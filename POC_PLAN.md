@@ -104,10 +104,22 @@ ArsChat 要件との最大の摩擦点。公式ドキュメントに記載がな
 
 Neo4j 廃止の技術検証。**追加ダウンロード無し**が要件。
 
-| # | 検証内容 | 合格基準 |
-|---|---|---|
-| 5-1 | sqlite-vec | Theia backend(Node)で better-sqlite3 + sqlite-vec(npm同梱、外部インストール不要)をロードし、ベクター類似検索が動く |
-| 5-2 | グラフ層 | nodes/edges テーブル+再帰CTEで k-hop 近傍探索が動く(GraphRAG の最小形: ベクター検索でエントリノード→グラフ展開で文脈収集) |
+| # | 検証内容 | 合格基準 | 判定 |
+|---|---|---|---|
+| 5-1 | sqlite-vec | Theia backend(Node)で better-sqlite3 + sqlite-vec(npm同梱、外部インストール不要)をロードし、ベクター類似検索が動く | **合格** |
+| 5-2 | グラフ層 | nodes/edges テーブル+再帰CTEで k-hop 近傍探索が動く(GraphRAG の最小形: ベクター検索でエントリノード→グラフ展開で文脈収集) | **合格** |
+
+**結論: 5-1/5-2/統合デモすべて合格。ただしスタンドアロンNodeスクリプトでの検証(`poc-graphrag/`配下、Theiaアプリへの組み込み自体はスコープ外)。「追加ダウンロード無し」要件は `better-sqlite3` をv12系以降に固定する前提で満たせる(v11系はNode v24向けプリビルド未提供でnode-gypローカルビルドにフォールバックする既知の問題があり、C++ビルドツール未導入環境では`npm install`が失敗しうる)。sqlite-vec本体はWindows含む主要プラットフォーム向けにnpm経由でプリビルド済みネイティブDLLが入り追加ダウンロード不要(ただしwin32-arm64は非対応)。詳細は `poc-graphrag/README.md` 参照。**
+
+#### 検証結果の詳細(PoC-5)
+
+実装は `poc-graphrag/`(独立npmパッケージ、`arschat-core`/`electron-app`とは無関係のスタンドアロンNodeスクリプト)。
+
+- **5-1 sqlite-vec**: `scripts/5-1-vector-search.js`。384次元・50件のダミー埋め込み(決定的擬似乱数)を`vec0`仮想テーブルに投入し、KNN検索(`MATCH`句、k=5)を実行。クエリ(item-1+微小ノイズ)に対し最近傍がitem-1自身であることを確認、JS側ブルートフォースのコサイン距離1位とも一致。5000件挿入40ms・KNN検索1.9msと性能上も問題なし。
+- **5-2 グラフ層**: `scripts/5-2-graph-khop.js`。`nodes(id,label,content)`/`edges(src,dst,relation)`で30ノード37エッジの知識グラフを構築し、`WITH RECURSIVE`による無向k-hop近傍探索(k=2)を実施。起点ノードから期待される1-hop/2-hopノード群が正しく取得できることを確認。
+- **統合デモ**: `scripts/5-3-integrated-graphrag.js`。1つのSQLiteファイルに`vec0`とnodes/edgesを同居させ、「クエリベクター→vec0でエントリノード特定→再帰CTEで2-hop展開→文脈テキスト収集」のGraphRAG最小パイプラインが1スクリプトで動作することを確認。
+- **Electron組み込みの既知リスク(情報収集のみ、実機未検証)**: ASARパッケージング下でのネイティブ拡張(`.dll`)ロード問題(asarUnpack設定が必須、electron-builderでsqlite-vecの実例報告あり)、Node/Electron間のABI不一致(`@electron/rebuild`相当が必須)。いずれも既知の回避策があり致命的ブロッカーではないと判断。
+- **Neo4j比で失われる機能**: Cypherの高度なグラフアルゴリズム(GDS: PageRank/コミュニティ検出等)、ベクターのANN(近似最近傍、sqlite-vecはブルートフォース)、マルチクライアント同時書き込み。ユーザーメモリのk-hop文脈収集用途では現状規模感で実用上問題ないと判断。
 
 ## 判定
 
@@ -122,4 +134,4 @@ Neo4j 廃止の技術検証。**追加ダウンロード無し**が要件。
 - [x] PoC-2: 2-1/2-2/2-3 すべて合格。Theia本体無改変、`arschat-core` の frontend 拡張(既存 `ArschatCoreWidget` の main エリア化 + `FrontendApplicationContribution` + `FilterContribution`)と `electron-app/package.json` の `theia.frontend.config` 設定のみで実現。SCM/Debug/Search-in-workspaceのActivityBar項目・メニューは依存関係に含まれておらず構造的に非表示(追加対応不要)。詳細は上表および `BUILD_NOTES.md` 参照。スクリーンショットは `poc-artifacts/poc2-main-window.png`(gitignore対象、リポジトリ非同梱)。
 - [ ] PoC-3
 - [ ] PoC-4
-- [ ] PoC-5
+- [x] PoC-5: 5-1/5-2/統合デモすべて合格。`poc-graphrag/`(独立npmパッケージ、Theia組み込みはスコープ外)でbetter-sqlite3+sqlite-vecによるベクター検索と再帰CTEによるグラフk-hop探索、両者を組み合わせたGraphRAG最小パイプラインが動作することを確認。「追加ダウンロード無し」要件はbetter-sqlite3をv12系以降に固定する前提で満たせる(v11系はNode v24向けプリビルド未提供の既知問題あり)。詳細は上表および `poc-graphrag/README.md` 参照。Electron実機組み込み検証(ASARアンパック設定・electron-rebuild)は未実施(情報収集のみ、スコープ外)。

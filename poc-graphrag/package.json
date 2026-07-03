@@ -1,0 +1,17 @@
+{
+  "name": "poc-graphrag",
+  "version": "0.0.1",
+  "private": true,
+  "description": "PoC-5: Embedded GraphRAG spike (better-sqlite3 + sqlite-vec, no external downloads)",
+  "type": "commonjs",
+  "scripts": {
+    "poc:5-1": "node scripts/5-1-vector-search.js",
+    "poc:5-2": "node scripts/5-2-graph-khop.js",
+    "poc:integrated": "node scripts/5-3-integrated-graphrag.js",
+    "poc:all": "npm run poc:5-1 && npm run poc:5-2 && npm run poc:integrated"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "sqlite-vec": "^0.1.9"
+  }
+}
