@@ -130,3 +130,56 @@ onWindowAllClosed(event) {
 [PoC-1][autotest] t+13s: process still alive after closing all windows -> PASS (tray-resident behavior confirmed)
 ```
 エラー・例外は一切出力されなかった。通常起動(環境変数なし)でも `[PoC-1][autotest]` 系のログは一切出力されず(no-op確認)、tray生成・globalShortcut登録は成功、`ready` 状態まで到達し、`electron.exe` プロセス(main/renderer/GPU/utility等、5〜6プロセス)の生存を確認後 `taskkill /F /IM electron.exe` で終了した。
+
+## PoC-2 実装メモ (チャット主役のワークベンチレイアウト検証)
+
+### 変更したファイル
+
+- `arschat-core/src/browser/arschat-core-widget.tsx`: 生成テンプレートの「ボタン付きサンプルウィジェット」をダミーチャットUI(ヘッダー/メッセージ吹き出し/入力欄)に改装。`title.closable = false` にして、ユーザーがチャットビューそのものを閉じられないようにした(2-1の「常にメインを占有」を強める設計判断)。
+- `arschat-core/src/browser/arschat-core-contribution.ts`: `ArschatCoreContribution` の `defaultWidgetOptions.area` を `'left'` → `'main'` に変更。加えて `FrontendApplicationContribution` を実装し `initializeLayout` / `onStart` の両方でウィジェットを開く(理由は下記「ハマった点1」)。
+- `arschat-core/src/browser/arschat-ide-dilution.ts`(新規): `ArschatMenuFilterContribution`(`FilterContribution` 実装)。Selection/Go/Terminalメニューを`MenuContribution`型に限定してフィルタで除去。
+- `arschat-core/src/browser/arschat-core-frontend-module.ts`: 上記2つのDI登録を追加(`bind(FilterContribution).toService(...)`)。
+- `arschat-core/package.json`: `dependencies` に `@theia/editor` / `@theia/monaco` / `@theia/terminal` を追加(フィルタ対象クラスの型・実体を直接importするため)。いずれも `electron-app` 経由で既にワークスペースに解決済みのバージョン(1.71.2)で、新規ダウンロードは発生しなかった(`yarn.lock` に差分なし)。
+- `arschat-core/src/electron-main/arschat-electron-main-application.ts`: `getDefaultOptions()` をオーバーライドし、PoC-1のトレイアイコン(base64埋め込みPNG)をウィンドウアイコンとしても流用。
+- `arschat-core/src/electron-main/arschat-poc2-autotest-contribution.ts`(新規): `ARSCHAT_POC2_AUTOTEST=1` 時のみ、起動15秒後にメインウィンドウを `capturePage()` でスクリーンショット化し `poc-artifacts/poc2-main-window.png` に保存。
+- `arschat-core/src/electron-main/arschat-electron-main-module.ts`: 上記autotestコントリビューションを登録。
+- `electron-app/package.json`: `theia.frontend.config` に `applicationName: "ArsChat"` と `preferences: { "workbench.statusBar.visible": false }` を追加。
+- `.gitignore`: `poc-artifacts/` を追加(スクリーンショット成果物はコミットしない)。
+
+### 使ったDIポイント・設定ポイント
+
+- **`defaultWidgetOptions.area: 'main'`**(`AbstractViewContribution` 標準オプション): ウィジェットをメインのドックパネルへ配置する、ごく通常のTheia API。特別な拡張は不要。
+- **`FrontendApplicationContribution#initializeLayout` / `#onStart`**: どちらも `@theia/core/lib/browser/frontend-application-contribution.d.ts` で定義された標準インターフェースのオプショナルメソッド。`initializeLayout` は「永続化されたシェルレイアウトが存在しない場合のみ」呼ばれるドキュメント通りの挙動を実機でも確認(後述)。
+- **`FilterContribution` / `ContributionFilterRegistry`**(`@theia/core/lib/common/contribution-filter`): `ContributionProvider`(`contribution-provider.js:48`)が全ての多重バインド型(`CommandContribution`, `MenuContribution`, `KeybindingContribution`, `FrontendApplicationContribution` 等)に対して汎用的に `applyFilters(contributions, type)` を呼ぶ仕組みを利用。型を `MenuContribution` に限定して `addFilters` することで、対象クラスの「メニュー登録」だけを止め、同じクラスが持つコマンド/キーバインディング/パネル機能は無傷のまま残せる(`@theia/terminal` の `TerminalFrontendContribution` は1クラスが `CommandContribution` / `MenuContribution` / `KeybindingContribution` / `FrontendApplicationContribution` / `TabBarToolbarContribution` / `ColorContribution` に個別バインドされているため、この粒度のフィルタが可能— `terminal-frontend-module.js:79`)。
+- **`theia.frontend.config.preferences`**(package.json、コード不要): Theiaにビルトインの `FrontendConfigPreferenceContribution`(`@theia/core/lib/browser/preferences/frontend-config-preference-contributions.js`)が `FrontendApplicationConfigProvider.get().preferences` を読み、各エントリを `PreferenceSchemaService.registerOverride(key, undefined, value)` として登録する。つまり「preferenceのデフォルト値をコードなしで上書きする」公式の仕組みがTheia側に既に存在しており、`workbench.statusBar.visible: false` はここに書くだけで済んだ(独自の `PreferenceContribution` 実装は不要だった — 一度書いてから、この組み込み機構に気づいて置き換えた)。
+- **`theia.frontend.config.applicationName`**(package.json): `ApplicationPackage#props` が `package.json` の `theia` フィールドを `ApplicationProps.DEFAULT`(`frontend.config.applicationName` のデフォルトは `'Eclipse Theia'`)に `deepmerge` する(`application-package.ts:82`、`application-props.ts:124-133`)。electron-main側では `getDefaultOptions()` が `title: this.config.applicationName` としてそのままウィンドウタイトルに使う(`electron-main-application.js:496`)。
+- **`ElectronMainApplication#getDefaultOptions()` のoverride**: PoC-1で導入済みの `ArschatElectronMainApplication`(rebind済みサブクラス)に追加。`super.getDefaultOptions()` の戻り値に `icon` プロパティを足すだけで、Theia本体が毎回のウィンドウ生成時にこの値を使う(`electron-main-application.js:391` で `...this.config.electron?.windowOptions` と一緒にスプレッドされる)。
+
+### ハマった点
+
+1. **`initializeLayout` が1回目の起動でしか発火しない**: 最初、`ArschatCoreContribution` に `initializeLayout` だけを実装してビルド・起動したところ、**2回目以降の起動でメインエリアが白紙のまま**になった(スクリーンショットで実際に確認)。原因は `initializeLayout` の仕様通り「永続化されたシェルレイアウトが存在しない場合のみ」呼ばれるためで、Electronの `userData` ディレクトリ(`%APPDATA%/electron-app/`)に前回起動時の(チャットウィジェット導入前の)シェル状態が残っていたことが直接の引き金だった。対策として `onStart` でも無条件にウィジェットを open+activate するようにし、「初回はinitializeLayoutで」「以降はonStartで毎回強制」という二段構えにした。加えてウィジェット自身を `closable: false` にして、ユーザー操作でメインエリアが空になる経路自体を塞いだ。PoCの検証環境ではプロセスを `taskkill`/`timeout` で強制終了することが多く、レイアウトが正常に永続化されないケースが多々あったため、この「毎回強制」の設計は実利があった。
+2. **`FilterContribution`/`PreferenceSchemaService` は `@theia/core` のメインバレルから型解決できるが、フィルタ対象クラス(`MonacoEditorMenuContribution` 等)は各パッケージのサブパスから直接importする必要がある**: `arschat-core` は元々 `@theia/core` にしか依存していなかったため、`@theia/monaco/lib/browser/monaco-menu` 等をimportするには `arschat-core/package.json` の `dependencies` に `@theia/editor` / `@theia/monaco` / `@theia/terminal` を追加する必要があった。追加後 `yarn install` を実行したが、これらは既に `electron-app` 経由でワークスペースに解決済み(バージョンピン留めのおかげでバージョン衝突なし)だったため、`yarn.lock` に差分は一切発生しなかった。
+3. **`npm install` が `yarn.lock` を意図せず巻き込んで書き換えた**: 依存追加後に(誤って)ルートで `npm install` を実行したところ、`yarn.lock` の中身がnpmレジストリURL形式に書き換わる大規模な差分(1798行変更)が発生した。このプロジェクトは yarn 管理(`yarn.lock` がコミット対象、`package-lock.json` は非対象)なので、`git checkout -- yarn.lock` で差分を破棄し、生成された `package-lock.json` を削除した上で `yarn install` に統一してやり直した。教訓: このリポジトリでは依存関係の変更後は必ず `yarn install` を使うこと(`npm install` を混在させない)。
+4. **`MenuModelRegistry` にサブメニュー丸ごと削除するAPIが無い**: `unregisterMenuAction(id | Command | MenuAction, menuPath?)` は「特定のリーフ項目」をid単位で消す関数であり、「Selection」「Go」「Terminal」のような**トップレベルメニューまるごと**を消すAPI(`unregisterSubmenu`のようなもの)は存在しない。そのため、個々の `registerMenuAction` 呼び出しを後から取り消すのではなく、`FilterContribution` で「メニュー登録処理そのものを実行させない」アプローチを取った。これはTheia本体を一切変更せず、かつ副作用(コマンド・キーバインディング)を残したまま実現できる、より上流での除去方法として機能した。
+5. **package.json の `theia` 設定ブロックに直接アイコン用のキーは存在しない**: `FrontendApplicationConfig`(`application-props.ts`)には `applicationName` はあるが専用の `icon` キーは無い。ただし `theia.frontend.config.electron.windowOptions` は Electronの `BrowserWindowConstructorOptions` 型がそのまま `getDefaultOptions()` にスプレッドされる実装になっており(`electron-main-application.js:391`)、理論上は `windowOptions.icon` にファイルパスを書けば設定自体は可能。ただし、JSON文字列としてファイルパスを書く場合の実行時カレントディレクトリ依存の解決リスクを避けるため、今回はPoC-1と同じ「base64埋め込み + `nativeImage.createFromDataURL` をコードで生成」方式を採用し、`getDefaultOptions()` のoverrideで注入した(package.json設定ではなくコードベースの手段だが、これもTheia本体は無改変)。実行ファイル自体のアイコン(タスクバー上のexeアイコン)はelectron-builderのパッケージング段階の設定であり、このPoCのビルド(`theia build` + `electron .` 相当の起動)のスコープ外。
+
+### 実機ログでの確認結果(要旨)
+
+`ARSCHAT_POC2_AUTOTEST=1` 起動時(プロファイルクリア後の初回起動):
+```
+[PoC-1] tray created successfully - app will stay resident after all windows are closed
+[PoC-1] globalShortcut.register('CommandOrControl+Shift+Space') === true
+[PoC-1] globalShortcut.register('CommandOrControl+Shift+W') === true
+[PoC-2][autotest] enabled
+...
+[PoC-2] MenuContribution filtered out: EditorMenuContribution
+[PoC-2] MenuContribution filtered out: MonacoEditorMenuContribution
+[PoC-2] MenuContribution filtered out: TerminalFrontendContribution
+[PoC-2] onStart: chat widget activated (id=arschat-core:widget)
+...
+[PoC-2] initializeLayout: chat widget opened in main area (fresh layout)
+...
+[PoC-2][autotest] t+15s: 1 window(s) open, capturing the first one
+[PoC-2][autotest] screenshot saved -> C:\Users\takep\source\arschat-theia\poc-artifacts\poc2-main-window.png -> PASS
+```
+2回目以降の起動(同一プロファイル、ただし前回セッションは `timeout` コマンドによる強制終了で正常終了していない)でも同じログが再現し、`initializeLayout` も含めて毎回発火した(レイアウトが正しく永続化されていなかったため)。いずれの実行でもスクリーンショット上でメインエリアのチャットUI・4項目のみのメニューバー・ステータスバー非表示・ウィンドウタイトル「ArsChat - ArsChat」を確認した。エラー・例外は出力されなかった(スクリプトを`timeout`で強制終了した際に出る `Network service crashed` / `GPU process exited unexpectedly` は検証プロセスの強制終了に起因するものでPoC-2のコードとは無関係)。

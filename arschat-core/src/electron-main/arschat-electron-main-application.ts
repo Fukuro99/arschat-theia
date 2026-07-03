@@ -14,7 +14,9 @@
 
 import { injectable } from '@theia/core/shared/inversify';
 import { ElectronMainApplication } from '@theia/core/lib/electron-main/electron-main-application';
-import { Event as ElectronEvent } from '@theia/core/electron-shared/electron';
+import { TheiaBrowserWindowOptions } from '@theia/core/lib/electron-main/theia-electron-window';
+import { Event as ElectronEvent, nativeImage } from '@theia/core/electron-shared/electron';
+import { TRAY_ICON_PNG_BASE64 } from './arschat-tray-icon';
 
 @injectable()
 export class ArschatElectronMainApplication extends ElectronMainApplication {
@@ -34,5 +36,20 @@ export class ArschatElectronMainApplication extends ElectronMainApplication {
             return;
         }
         super.onWindowAllClosed(event);
+    }
+
+    /**
+     * PoC-2 (2-3): placeholder ArsChat window icon, reusing the PoC-1 tray
+     * icon asset (a temporary solid-color PNG). There is no `theia.frontend`
+     * package.json key for the app/window icon (that only exists at the
+     * electron-builder packaging stage, out of scope for this PoC), so the
+     * icon is set here via `BrowserWindowConstructorOptions.icon`, which
+     * Theia's own `getDefaultOptions()` already merges into `windowOptions`
+     * on every window it creates.
+     */
+    protected override getDefaultOptions(): TheiaBrowserWindowOptions {
+        const options = super.getDefaultOptions();
+        options.icon = nativeImage.createFromDataURL(`data:image/png;base64,${TRAY_ICON_PNG_BASE64}`);
+        return options;
     }
 }

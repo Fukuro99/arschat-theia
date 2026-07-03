@@ -15,7 +15,10 @@
     "src"
   ],
   "dependencies": {
-    "@theia/core": "1.71.2"
+    "@theia/core": "1.71.2",
+    "@theia/editor": "1.71.2",
+    "@theia/monaco": "1.71.2",
+    "@theia/terminal": "1.71.2"
   },
   "devDependencies": {
     "rimraf": "^5.0.0",

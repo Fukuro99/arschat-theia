@@ -7,3 +7,4 @@ dist
 !*-app/package.json
 .yarn-integrity
 *.tsbuildinfo
+poc-artifacts/

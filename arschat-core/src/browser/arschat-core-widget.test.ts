@@ -27,7 +27,7 @@ describe('ArschatCoreWidget', () => {
 
     it('should render react node correctly', async () => {
         const element = render(widget.render());
-        expect(element.queryByText('Display Message')).toBeTruthy();
+        expect(element.queryByText('送信')).toBeTruthy();
     });
 
     it('should inject \'MessageService\'', () => {

@@ -20,6 +20,7 @@ import { ElectronMainApplication, ElectronMainApplicationContribution } from '@t
 import { ArschatElectronMainApplication } from './arschat-electron-main-application';
 import { ArschatTrayContribution } from './arschat-tray-contribution';
 import { ArschatPoc1AutotestContribution } from './arschat-poc1-autotest-contribution';
+import { ArschatPoc2AutotestContribution } from './arschat-poc2-autotest-contribution';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(ArschatElectronMainApplication).toSelf().inSingletonScope();
@@ -30,4 +31,7 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
     bind(ArschatPoc1AutotestContribution).toSelf().inSingletonScope();
     bind(ElectronMainApplicationContribution).toService(ArschatPoc1AutotestContribution);
+
+    bind(ArschatPoc2AutotestContribution).toSelf().inSingletonScope();
+    bind(ElectronMainApplicationContribution).toService(ArschatPoc2AutotestContribution);
 });
