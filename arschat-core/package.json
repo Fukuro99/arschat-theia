@@ -37,6 +37,9 @@
   "theiaExtensions": [
     {
       "frontend": "lib/browser/arschat-core-frontend-module"
+    },
+    {
+      "electronMain": "lib/electron-main/arschat-electron-main-module"
     }
   ]
 }
