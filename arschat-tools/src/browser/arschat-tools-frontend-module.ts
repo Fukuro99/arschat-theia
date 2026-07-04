@@ -48,8 +48,11 @@ import { ReadFileToolProvider } from './read-file-tool-provider';
 import { WriteFileToolProvider } from './write-file-tool-provider';
 import { EditFileToolProvider } from './edit-file-tool-provider';
 import { RunCommandToolProvider } from './run-command-tool-provider';
+import { WebSearchToolProvider } from './web-search-tool-provider';
+import { FetchPageToolProvider } from './fetch-page-tool-provider';
 import { ARSCHAT_ALL_TOOL_IDS } from '../common/tool-ids';
 import { CommandRunnerService, commandRunnerServicePath } from '../common/command-runner-protocol';
+import { WebFetchService, webFetchServicePath } from '../common/web-fetch-protocol';
 
 @injectable()
 export class ArschatToolsRegistrationContribution implements FrontendApplicationContribution {
@@ -64,8 +67,9 @@ export class ArschatToolsRegistrationContribution implements FrontendApplication
     protected readonly logger!: ILogger;
 
     onStart(): void {
-        // All ToolProviders (file tools + run_command) were already collected into
-        // the registry by ToolInvocationRegistryImpl.init(); resolve exactly ours by id.
+        // All ToolProviders (file tools + run_command + web_search/fetch_page) were
+        // already collected into the registry by ToolInvocationRegistryImpl.init();
+        // resolve exactly ours by id.
         const tools = this.toolRegistry.getFunctions(...ARSCHAT_ALL_TOOL_IDS);
         this.agent.setToolRequests(tools);
         const resolved = tools.map(t => t.id).join(', ') || '<none>';
@@ -88,12 +92,21 @@ export function bindArschatTools(bind: interfaces.Bind): void {
         return provider.createProxy<CommandRunnerService>(commandRunnerServicePath);
     }).inSingletonScope();
 
+    // web_search / fetch_page share one backend service, reached the same way
+    // (JSON-RPC proxy from webFetchServicePath).
+    bind(WebFetchService).toDynamicValue(ctx => {
+        const provider = ctx.container.get<ServiceConnectionProvider>(RemoteConnectionProvider);
+        return provider.createProxy<WebFetchService>(webFetchServicePath);
+    }).inSingletonScope();
+
     // Register the ToolProviders (each bound to self + as a ToolProvider
     // contribution, per bindToolProvider's contract).
     bindToolProvider(ReadFileToolProvider, bind);
     bindToolProvider(WriteFileToolProvider, bind);
     bindToolProvider(EditFileToolProvider, bind);
     bindToolProvider(RunCommandToolProvider, bind);
+    bindToolProvider(WebSearchToolProvider, bind);
+    bindToolProvider(FetchPageToolProvider, bind);
 
     // Attach the resolved tools to the ArsChat agent on startup.
     bind(ArschatToolsRegistrationContribution).toSelf().inSingletonScope();

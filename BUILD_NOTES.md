@@ -711,3 +711,35 @@ M3 のモック LanguageModel 方式を流用し、**モックが受け取った
 6. `common/tool-ids.ts` の `ARSCHAT_ALL_TOOL_IDS` に新 id を追加(registration contribution が自動で拾って agent に載せる)。
 
 **注意点**: (a) web_search/fetch_page は外部 HTTP を叩くので Node の `fetch`/`undici` は backend でのみ。CORS 回避のためにも backend 処理は正解。(b) 出力(検索結果本文・ページ HTML)は run_command と同じく**巨大化しがち → `truncateOutput` 相当の上限を必ず入れる**(50_000 char 慣習を踏襲)。(c) タイムアウト・エラーの result 型は run_command の `{ok/exitCode, truncated, timedOut}` を参考に。(d) `theiaExtensions.backend` は既に宣言済みなので**追加のパッケージ配線は不要**、新サービスの ConnectionHandler を足すだけ。
+
+---
+
+## Phase 1 M5 実装メモ (e-5: web_search / fetch_page を backend 移植、読み取り扱いで無確認)
+
+作成: 2026-07-05 / 対象: PHASE1_DESIGN.md §7・§9 M5(e-5)。現行 ArsChat の `src/main/web-search.ts`(全98行)を移植し、**Web 検索 `web_search` / ページ取得 `fetch_page` の2ツール**を追加。e-4 で足場が済んだ backend + JSON-RPC の定型6ステップにそのまま乗せ、**新サービス `WebFetchService` を1本足すだけ**で実装。**Theia 本体は一切改変せず**、全パッケージ 1.71.2 ピン留め維持。追加依存は `turndown ^7.2.4` + `@types/turndown ^5.0.6`(arschat-tools/package.json)。`fetch` は Node 18+ ビルトインで追加依存なし。
+
+### 実装ファイル(6ステップ対応)
+
+1. **共有プロトコル** `src/common/web-fetch-protocol.ts`: service path `webFetchServicePath='/services/arschat-web-fetch'`、DI symbol `WebFetchService`、`WebSearchRequest/Result`・`FetchPageRequest/Result` 型。**Theia ランタイム非依存**(command-runner-protocol.ts と同じ規律)。web_search/fetch_page は 1 サービス 2 メソッドに束ねた(検索と本文取得は同じ「外部 HTTP」ドメインで、RPC path を増やす意味が薄いため)。
+2. **pure ロジック** `src/common/web-fetch.ts`(`parseDdgResults`・`unwrapDdgUrl`・`truncateText`・`clampFetchLength` + 各定数)+ **ToolRequest factory** `src/common/web-fetch-tool-request.ts`(`createWebSearchTool`/`createFetchPageTool`、**`confirmAlwaysAllow` は付けない**=read-only)。
+3. **backend impl** `src/node/web-fetch-service-impl.ts`: `@injectable` な `WebFetchServiceImpl`。実際に `fetch` + `TurndownService` する唯一の場所。
+4. **backend module** `src/node/arschat-tools-backend-module.ts` に `bind(WebFetchService).to(Impl)` + `ConnectionHandler`(2本目の RpcConnectionHandler)を追記。
+5. **frontend proxy + provider** `src/browser/arschat-tools-frontend-module.ts` に `WebFetchService` proxy bind を追記、`src/browser/web-search-tool-provider.ts` / `fetch-page-tool-provider.ts`(各 `ToolProvider` かつ `WebToolBackend`、getTool は factory 委譲、backend は共有 proxy 呼び出し)を `bindToolProvider`。
+6. **id 登録** `src/common/tool-ids.ts` の `ARSCHAT_ALL_TOOL_IDS` に `web_search` / `fetch_page` を追加(registration contribution が自動で拾い agent の additionalToolRequests に載る)。
+
+### 移植元(web-search.ts)から変えた点と理由
+
+- **エラー形式**: 原典は HTTP 失敗/タイムアウトで **throw**。ここでは backend service は Error を JSON-RPC 越しに投げるが、**frontend の factory handler が `toolError(...)`(`ERROR: …` 文字列)に整形して LLM に返す**(SPEC 指定=throw ではなく tool result 文字列)。LLM がツール失敗を読んで対処できる。
+- **承認**: **付けない**(read-only 扱い)。web_search/fetch_page はローカルに一切書き込まないので `confirmAlwaysAllow` 無し=既定 ALWAYS_ALLOW で無確認実行(read_file と同扱い)。write系/run_command との差はここだけ。
+- **出力上限**: 原典は `fetchPage(maxLength=15000)` 既定・上限なし。**既定 15,000 は尊重**(`FETCH_PAGE_DEFAULT_MAX_LENGTH`)しつつ、**caller 指定 maxLength を 50,000 のハード上限にクランプ**(`clampFetchLength` → `FETCH_PAGE_MAX_LENGTH`、read_file/run_command の 50,000 char 慣習と整合)。**判断理由**: 取得ページは「複数ページを一度に読む」使われ方をするので per-page 15,000 の方が集約コンテキストを抑えつつ本文を拾える。一方 LLM に大きい maxLength を渡されても context を溢れさせないよう 50,000 で必ず頭打ち。web_search 結果は件数上限(既定10)で自然に短いため truncate 不要。
+- **タイムアウト**: 原典どおり `AbortSignal.timeout` を **web_search 15s / fetch_page 20s** で維持(定数化 `WEB_SEARCH_TIMEOUT_MS`/`FETCH_PAGE_TIMEOUT_MS`)。
+- **DDG パース / URL 復元 / Markdown 変換 / 打ち切り**: 挙動は原典を忠実に踏襲。`result__snippet`/`result__a` の正規表現、`uddg` パラメータからの実 URL 復元、`duckduckgo.com` 自己リンク除外、Turndown(`headingStyle:atx`/`bulletListMarker:'-'`/`codeBlockStyle:'fenced'`、`script/style/nav/footer/aside/noscript/iframe/svg` を remove)。パース・復元・打ち切りは pure 関数として `common/web-fetch.ts` に切り出し、**固定 HTML フィクスチャで jest 検証**(実ネットワーク非依存)。
+- **turndown の import**: 当パッケージ tsconfig は `esModuleInterop` 無し。turndown は `export = TurndownService`(CommonJS)なので `import TurndownService = require('turndown')` の TS 形式で読む(default import だとフラグが要る)。`td.remove()` の型 `Filter`(=`(keyof HTMLElementTagNameMap)[]`)に合わせ、common 側の `string[]` 定数を impl 側で `as TurndownService.Filter` narrow(common を DOM 型非依存に保つため)。
+
+### 検証結果(正直に)
+
+- **jest: arschat-tools 55/55 PASS(オフライン既定)**(e-4 の 33 から +22)。内訳: `web-fetch.test.ts` 12(`unwrapDdgUrl` 3=uddg 復元/param 無し fallback/unparseable fallback・`parseDdgResults` 4=固定フィクスチャで title/url/snippet 抽出+タグ除去+redirect 復元/duckduckgo.com 除外/maxResults/結果ゼロ・`truncateText` 2・`clampFetchLength` 3=既定 15000/透過/50000 クランプ)、`web-fetch-tool-request.test.ts` 10(両ツールの shape=**read-only で confirmAlwaysAllow 無しを明示検証**・引数透過・空引数拒否・backend 失敗の ERROR 整形・結果整形〔検索リスト/no-results・ページ本文/truncated 注記/Markdown 注記の有無〕)。
+- **実ネットワーク smoke**: `src/node/web-fetch-service-impl.test.ts` 2本。**既定は `describe.skip` でスキップ**(`ARSCHAT_WEB_SMOKE=1` の時だけ実行)なので、CI・オフラインサンドボックス・DDG 障害でも既定 `yarn test` は壊れない(受入条件3「失敗しても CI を壊さない形」)。**手動実行 `ARSCHAT_WEB_SMOKE=1 yarn --cwd arschat-tools test` で 57/57 PASS を確認**: 実 DuckDuckGo 検索が title + http(s) URL 付き結果を返す/`https://example.com` を実取得して isHtml=true の非空 Markdown になる、を実ネットワークで裏取り済み。
+- **回帰なし**: arschat-chat 14/14・arschat-agents 11/11。
+- **ビルド**: `yarn build:electron` webpack **`compiled successfully`**。`tsc` エラー0。生成 backend bundle に `../arschat-tools/lib/node/*.js` **3 module**(backend-module + command-runner + web-fetch)、`common/*.js` 4 module を確認。`src-gen/backend/server.js`・`src-gen/frontend/index.js` に arschat-tools module の `load(...)` を確認。
+- **ライブ検証(実キーでの LLM 往復)**: e-2〜e-4 同様 **API キー不在の検証サンドボックス制約で未実施**(e-10 に集約)。配線は「ToolProvider 登録 → registry 解決 → agent の additionalToolRequests に載る」まで静的に確立済みで、backend サービスは上記 smoke で実 DDG 検索/実ページ取得まで実ネットワークで動作確認済み。受入①(検索結果が回答に反映される配線)②(URL→本文 Markdown が反映される配線)は「6ツールが agent に載る」構造で達成。

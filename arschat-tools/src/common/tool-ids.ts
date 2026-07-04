@@ -18,5 +18,16 @@ export const ARSCHAT_FILE_TOOL_IDS = [READ_FILE_TOOL_ID, WRITE_FILE_TOOL_ID, EDI
 // frontend module can register it alongside ARSCHAT_FILE_TOOL_IDS.
 export const RUN_COMMAND_TOOL_ID = 'run_command';
 
+// M5 e-5: web_search / fetch_page are *backend* (node fetch + Turndown) tools.
+// Unlike run_command they are read-only (network read, no local mutation), so
+// they carry NO confirmAlwaysAllow and run unconfirmed like read_file.
+export const WEB_SEARCH_TOOL_ID = 'web_search';
+export const FETCH_PAGE_TOOL_ID = 'fetch_page';
+
 /** Every ArsChat AI tool id the frontend module resolves and attaches to the agent. */
-export const ARSCHAT_ALL_TOOL_IDS = [...ARSCHAT_FILE_TOOL_IDS, RUN_COMMAND_TOOL_ID];
+export const ARSCHAT_ALL_TOOL_IDS = [
+    ...ARSCHAT_FILE_TOOL_IDS,
+    RUN_COMMAND_TOOL_ID,
+    WEB_SEARCH_TOOL_ID,
+    FETCH_PAGE_TOOL_ID
+];
