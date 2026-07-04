@@ -86,3 +86,26 @@
     padding: 10px;
     text-transform: uppercase;
 }
+
+/* PoC-4 (4-3): custom ChatResponsePartRenderer for InformationalChatResponseContent. */
+.arschat-informational-part {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 6px 10px;
+    margin: 4px 0;
+    border-left: 3px solid var(--theia-focusBorder, #007acc);
+    background: var(--theia-editorWidget-background, #2d2d2d);
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--theia-descriptionForeground);
+}
+
+.arschat-informational-part-icon {
+    flex: 0 0 auto;
+    margin-top: 1px;
+}
+
+.arschat-informational-part-body {
+    flex: 1 1 auto;
+}

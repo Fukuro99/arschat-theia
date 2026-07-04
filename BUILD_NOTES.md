@@ -223,3 +223,114 @@ onWindowAllClosed(event) {
 - ビルド成果物: `electron-app/lib` 全体で約235MB(frontend 176MB / backend 57MB、development modeビルド)。プラグイン4種(VSIX+展開後)は約25MB。node_modules の @theia パッケージ数は 25→45。
 - 起動時間: warm profile で「All frontend contributions settled: ~1.7〜3.5s / backend起動から ready まで ~3.2〜6.7s」。PoC-2時点と同オーダーで、plugin host の起動は非同期のため体感の起動時間への影響は軽微。プラグインのデプロイ自体は ~30ms、4プラグインのsync ~30ms。
 - plugin host は別プロセス(`PLUGIN_HOST(pid) starting instance`)として起動し、GitLensのような重量級拡張のロードもフロントエンドをブロックしない。
+
+## PoC-4 実装メモ (Theia AI + Anthropic + MCP 検証)
+
+### 追加した依存関係 (electron-app/package.json と arschat-core/package.json、すべて1.71.2)
+
+- `@theia/ai-core` — Theia AI基盤(LanguageModelRegistry、AIActivationService等)。PoC-3で`@theia/plugin-ext`の推移的依存として既にnode_modulesに存在していたが、明示的な直接依存として追加。
+- `@theia/ai-chat` — チャットセッション/エージェントのモデル層(バックエンド)。
+- `@theia/ai-chat-ui` — チャットビューUI(`ChatViewWidget`、`ChatResponsePartRenderer`拡張ポイント)。
+- `@theia/ai-anthropic` — Anthropicプロバイダ(`@anthropic-ai/sdk`を内部依存)。
+- `@theia/ai-mcp` — MCPクライアント(`@modelcontextprotocol/sdk`を内部依存)。PoC-3で`@theia/plugin-ext`経由で既にnode_modulesに存在。
+
+いずれも1.71.2でnpm registry上に実在することを`npm view @theia/<pkg> versions --json`で事前確認済み(依頼文で例示されたパッケージ名そのままで組めた。撤退条件に該当する事象は発生しなかった)。`yarn install`で追加、`@vscode/windows-ca-certs`のoptionalネイティブビルド失敗(PoC-3から既知、無害)以外のエラーは無し。
+
+### 重要な訂正: Theia AIはデフォルト無効ではない
+
+依頼文の前提「Theia AIはデフォルト無効のはず」は実機調査の結果誤りと判明した。`node_modules/@theia/ai-core/lib/browser/ai-activation-service.js`の`AIActivationServiceImpl`はコンストラクタで`this.isActive = true`と設定するデフォルト実装であり、ソースコード自身のコメントに以下の記載がある:
+
+> Default implementation of AIActivationService marks the feature active by default.
+> Adopters may override this implementation to provide custom activation logic.
+> Note that '@theia/ai-ide' also overrides this service to provide activation based on preferences, disabling the feature by default.
+
+つまり「`ai-features.ai.enable`のようなpreferenceでAI機能をトグルする」実装は`@theia/ai-ide`パッケージ側が提供するものであり、`@theia/ai-core`単体にその仕組みは無い。本PoCでは`@theia/ai-ide`を依存に加えていないため、`@theia/ai-anthropic`・`@theia/ai-mcp`・`@theia/ai-chat-ui`を依存に追加した時点でAI機能は既に有効状態だった。「AI機能を有効化する」という作業項目自体が不要だったことは、それ自体1.71時点のTheia AI構成の理解として記録に値する。
+
+### 4-1 Anthropic接続: APIキーの経路
+
+`AnthropicLanguageModelsManagerImpl`(`node_modules/@theia/ai-anthropic/lib/node/anthropic-language-models-manager-impl.js`)の`apiKey`ゲッターは:
+```js
+get apiKey() {
+    return this._apiKey ?? process.env.ANTHROPIC_API_KEY;
+}
+```
+という実装で、(1) `ai-features.anthropic.AnthropicApiKey` preference経由で明示設定されたキー、(2) 未設定ならバックエンドプロセスの環境変数`ANTHROPIC_API_KEY`、の優先順位でフォールバックする。preference経由は平文保存になる旨がスキーマのmarkdown descriptionに明記されており(「Use the environment variable ANTHROPIC_API_KEY to set the key securely.」)、本PoCでは環境変数経路をそのまま使う設計にし、preferenceへの書き込みは行っていない。
+
+モデル一覧(`ai-features.anthropic.AnthropicModels`)はデフォルトで`claude-opus-4-7`等5モデルが登録済みのため、追加設定なしでそのまま`FrontendLanguageModelRegistry.getLanguageModels()`から列挙できた。APIキー未設定時は各モデルの`status`が`{ status: 'unavailable', message: 'No Anthropic API key set' }`になる(`calculateStatus()`の実装)。これはUIでも「プロバイダは正しく登録されているが使えない」ことを区別可能にする設計になっている。
+
+### 4-2 MCP: ワークスペーストラストとの相互作用
+
+`McpFrontendApplicationContribution.autoStartServers()`は`WorkspaceTrustService.getWorkspaceTrust()`を見て、ワークスペースが信頼されていない場合は`autostart: true`のサーバーであっても起動をブロックする(`blockedUntrustedServers`に積むだけ)実装になっている。PoC-3で導入済みの`"security.workspace.trust.enabled": false`(preference)がここでも効いており、追加対応は不要だった。もしこのpreferenceが無かった場合、初回起動時の信頼ダイアログに応答するまでMCPサーバーの自動起動が保留される。
+
+サーバーには`@modelcontextprotocol/server-everything`(MCP公式のリファレンス実装、APIキー等の外部認証情報が一切不要で、echo/get-sum等の固定デモツール一式を提供)を選択。`electron-app/package.json`の`theia.frontend.config.preferences`に`ai-features.mcp.mcpServers`として:
+```json
+"everything": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-everything"], "autostart": true }
+```
+を追加するだけで、起動時に自動的に`npx`経由でstdioサーバーが起動し、`MCPServerManager.getTools()`で14個のツール一覧が取得できることを確認した。
+
+### 4-3 カスタムレンダラー: ターゲット選定の理由
+
+`ChatResponsePartRenderer`(`bindRootContributionProvider`によるマルチバインド、`canHandle(response): number`でスコアを返し最高得点のレンダラーが選ばれる設計)は素直な拡張ポイントで、rebind等の特殊な手段は不要だった。
+
+ターゲットに`InformationalChatResponseContent`(kind: `'informational'`)を選んだ理由は、Theia AI自身の未完成箇所を明確に実証できるため。標準の`MarkdownPartRenderer`(`node_modules/@theia/ai-chat-ui/lib/browser/chat-response-renderer/markdown-part-renderer.js`)の`canHandle()`はこのkindにスコア10を返して受理するが、`render()`は:
+```js
+if (common_1.InformationalChatResponseContent.is(response)) {
+    // null is valid in React
+    return null;
+}
+```
+と、TODOコメント(`// TODO let the user configure whether they want to see informational content`)付きで意図的に何も描画しない。つまり素の状態ではinformational contentはUI上に一切現れない。`ArschatInformationalPartRenderer`は同じkindに対して`canHandle()`で11を返すことで選択を勝ち取り、実際にバッジ風のReactコンポーネント(アイコン+Markdown本文)で描画する。「ビルドが通る」以上の実証として、素の状態(何も見えない)とPoC後の状態(見える)の差分が明確な題材になった。
+
+### ハマった点
+
+1. **`ContributionProvider`を直接injectしてコントリビューション一覧をログ出力する際のnamedタグ**: `bindRootContributionProvider(bind, ChatResponsePartRenderer)`は内部で`bind(ContributionProvider).toDynamicValue(...).whenTargetNamed(ChatResponsePartRenderer)`という`named`バインディングを使っている。そのため単純に`@inject(ContributionProvider)`するだけでは解決できず、consumer側も`@inject(ContributionProvider) @named(ChatResponsePartRenderer)`とinversifyの`named`デコレータで対にする必要があった(`@theia/core/shared/inversify`から`named`をimport)。
+2. **`UserRequest`の必須フィールド**: `LanguageModel.request()`の引数型`UserRequest`は`LanguageModelRequest`(`messages`のみ)を拡張し`sessionId`/`requestId`を必須にしている。autotestから直接呼ぶ際はダミー値(`'arschat-poc4-autotest'`、`Date.now()`ベースのID)を補う必要があった。
+3. **`PreferenceService`のimport元**: `@theia/core/lib/browser/preferences`からは型が見つからず(`PreferenceService`はcommon層のシンボル)、Anthropic本体の実装コードに倣い`@theia/core`のトップレベルバレルからimportする必要があった。
+4. **`MCP_SERVERS_PREF`はサブパスimportが必要**: `@theia/ai-mcp/lib/common`のバレル(`index.d.ts`)は`MCPServerManager`等のインターフェースのみを再エクスポートしており、preferenceキー定数(`MCP_SERVERS_PREF`)は`@theia/ai-mcp/lib/common/mcp-preferences`から直接importする必要があった(PoC-2でも`FilterContribution`対象クラスの直接サブパスimportで同種のことが起きている)。
+5. **チャットビューのスクリーンショットが狭い**: `aiChat:toggle`だけだとAI Chatパネルが右端に極小幅で開く場合があった。`ApplicationShell#resize(600, 'right')`で明示的に幅を広げてからスクリーンショットを撮ることで解決(見た目だけの問題で、コマンド実行自体の合否には無関係)。
+
+### 検証コード(autotest、いずれも `ARSCHAT_POC4_AUTOTEST=1` 時のみ動作)
+
+- `arschat-core/src/browser/arschat-poc4-autotest-contribution.ts`(frontend): t+8sにAnthropicプロバイダ登録・モデル一覧・status・`ANTHROPIC_API_KEY`有無をログ(キーがあれば実際に`LanguageModel.request()`を発火して応答をログ)、t+14sにMCPサーバーの設定・起動状態・ツール一覧をログ、t+17sに`ChatResponsePartRenderer`コントリビューション一覧をログして`ArschatInformationalPartRenderer`の存在を確認、t+20sに`aiChat:toggle`でチャットビューを開いてパネル幅を広げる。
+- `arschat-core/src/electron-main/arschat-poc4-autotest-contribution.ts`(electron-main): PoC-2/3と同じ`webContents.capturePage()`方式でt+26sに`poc4-chat-view.png`を保存。
+- `arschat-core/src/browser/arschat-informational-part-renderer.tsx`: 4-3のカスタムレンダラー本体(常時有効、autotestフラグに依存しない)。
+
+### 実機ログでの確認結果(要旨、`ANTHROPIC_API_KEY`未設定)
+
+```
+[PoC-4][autotest] enabled (frontend)
+[PoC-4][autotest] t+8s: 5 language model(s) registered total, 5 anthropic/* model(s)
+[PoC-4][autotest]   model id='anthropic/claude-opus-4-7' status='unavailable' message='No Anthropic API key set'
+  ...(5モデル分)
+[PoC-4][autotest] 4-1 provider registration -> PASS (Claude models enumerable via LanguageModelRegistry)
+[PoC-4][autotest] t+8s: backend process.env.ANTHROPIC_API_KEY present = false
+[PoC-4][autotest] 4-1 live call SKIPPED - ANTHROPIC_API_KEY not set in this environment. ...
+[PoC-4][autotest] t+14s: configured MCP server(s): everything
+[PoC-4][autotest] t+14s: running MCP server(s): everything
+[PoC-4][autotest] t+14s: MCP server 'everything' exposes 14 tool(s): echo, get-annotated-message, get-env, get-resource-links, get-resource-reference, get-structured-content, get-sum, get-tiny-image, gzip-file-as-resource, toggle-simulated-logging, toggle-subscriber-updates, trigger-long-running-operation, get-roots-list, simulate-research-query
+[PoC-4][autotest] 4-2 MCP server start + tool listing -> PASS
+[PoC-4][autotest] t+17s: 15 ChatResponsePartRenderer contribution(s) registered: ..., ArschatInformationalPartRenderer
+[PoC-4][autotest] 4-3 custom renderer registration -> PASS (...)
+[PoC-4][autotest] t+20s: executing command 'aiChat:toggle'
+[PoC-4][autotest] chat view opened -> PASS (ai-chat-ui wiring confirmed)
+[PoC-4][autotest] screenshot saved -> .../poc-artifacts/poc4-chat-view.png -> PASS
+```
+エラー・例外は一切出力されなかった(末尾の`Network service crashed`/`GPU process exited unexpectedly`はPoC-2/3同様、検証プロセスを`timeout`で強制終了したことに起因するものでPoC-4のコードとは無関係)。
+
+### ライブAPI検証手順(ユーザー向け)
+
+1. Anthropic APIキーを用意する(`sk-ant-...`形式)。
+2. シェルで`ANTHROPIC_API_KEY`環境変数を設定してから`electron-app`を起動する:
+   - PowerShellの例: `$env:ANTHROPIC_API_KEY = "sk-ant-..."; $env:ARSCHAT_POC4_AUTOTEST = "1"; npm --prefix electron-app run start`
+   - bashの例: `ANTHROPIC_API_KEY=sk-ant-... ARSCHAT_POC4_AUTOTEST=1 npm --prefix electron-app run start`
+3. 起動後約8秒で、ログに`[PoC-4][autotest] t+8s: ANTHROPIC_API_KEY detected -> attempting a live request against '...'`に続いて`live Anthropic response: 'PONG'`(または類似の応答)が出力されれば、Anthropicへのライブストリーミング呼び出しが成功している。
+4. 手動でチャットを試す場合は、アプリのウィンドウ右上のチャットアイコン(またはコマンドパレットで`AI Chat: Open`に相当する操作、内部コマンドID`aiChat:toggle`)からAI Chatパネルを開き、メッセージを入力して送信する。応答がストリーミングで表示されれば4-1のフル合格。
+5. MCPツールの実呼び出しを確認したい場合は、チャットで「echoツールを使ってHelloと返して」のように明示的にツール利用を促す、またはエージェント設定でMCPツールの利用を有効化した上で試す(現時点のautotestはツール一覧取得までを自動検証しており、チャット経由の実呼び出しはAPIキー必須のため未実施)。
+6. カスタムレンダラー(4-3)は、エージェントの応答にinformational content(処理中のステータス等)が含まれる場面で、ArsChat独自のバッジ風UI(左に色付きボーダー、infoアイコン付き)として表示されるはずである。標準UIでは同種の情報が非表示になる(意図的な仕様)ため、表示されること自体が差分の証拠になる。
+
+### Theia AI APIの流動性についての所感(1.71.2時点)
+
+- `InformationalChatResponseContent`の扱いが未完成(TODOコメント付きでrender()がno-op)であることからも分かる通り、Theia AIのチャットUI周りは活発に開発中で、コンテンツ種別の追加・レンダリング方針がまだ固まっていない箇所がある。将来バージョンでこの部分の挙動(informational contentをデフォルトで見せるかどうかの設定等)が変わる可能性があり、独自レンダラーで`canHandle()`スコアだけに依存する拡張は、アップストリームが同じkindに対して異なるスコアを返すよう変更された場合に優先順位が崩れるリスクがある(バージョン跨ぎで固定した方が安全)。
+- `ReasoningApi`/`EFFORT_REASONING`/`XHIGH_EFFORT`等、Anthropic側のモデル対応表(`DEFAULT_MODEL_MAX_TOKENS`等)が「Claude 4.6+」のような将来モデル名を正規表現で先取りする形でハードコードされている。Theia AI側がAnthropic SDKの世代交代に追従する形でこの種の定数を更新し続ける必要があり、実際のモデルリリースとTheia AI側のリリースサイクルがずれると「新モデルは動くがreasoning UIが出ない」等のギャップが生じ得る。
+- MCPの`ai-features.mcp.mcpServers`はJSON形式のfree-form preferenceであり、専用のGUI設定画面は無い(1.71.2時点)。サーバー追加は生JSON編集が前提になっており、VS Code等と比べるとMCP管理体験はまだ最小限。
+- `@theia/ai-ide`という「Theia AIのデフォルト無効化+preferenceベースの明示的有効化」を担うパッケージが別途存在すること自体、1.71時点でTheia AI機能群のパッケージ境界がまだ細かく分割されている途中(adopter側がどこまで機能を持ち込むかの裁量が大きい)ことを示している。今回のPoCのように`ai-ide`を経由せず`ai-core`+個別プロバイダ+`ai-chat-ui`だけを直接組み合わせる構成は、Theia公式のフルIDE構成(Theia IDEディストリビューション)とは異なる非標準ルートであり、将来のマイナーバージョンで`ai-core`のデフォルト値自体が変わる可能性は否定できない(現に「デフォルト有効」という前提の食い違いが実際に発生した)。

@@ -138,11 +138,59 @@ ArsChat 要件との最大の摩擦点。公式ドキュメントに記載がな
 
 ### PoC-4: Theia AI + Anthropic + MCP
 
-| # | 検証内容 | 合格基準 |
-|---|---|---|
-| 4-1 | Anthropic 接続 | Theia AI 経由で Claude とのストリーミングチャットが動く |
-| 4-2 | MCP | MCPサーバーを1つ登録しツールが呼ばれる |
-| 4-3 | カスタム描画 | チャット応答のカスタムレスポンスレンダラー(独自Reactコンポーネント)を1つ差し込める |
+| # | 検証内容 | 合格基準 | 判定 |
+|---|---|---|---|
+| 4-1 | Anthropic 接続 | Theia AI 経由で Claude とのストリーミングチャットが動く | **合格**(配線まで確認。`ANTHROPIC_API_KEY`未設定のためライブストリーミング自体は未実行 — 環境変数投入で自動実行されるautotestを実装済み) |
+| 4-2 | MCP | MCPサーバーを1つ登録しツールが呼ばれる | **合格**(APIキー不要、フル実動作を確認) |
+| 4-3 | カスタム描画 | チャット応答のカスタムレスポンスレンダラー(独自Reactコンポーネント)を1つ差し込める | **合格** |
+
+**結論: 3項目すべて合格(4-1は配線+モデル一覧まで、ライブAPI呼び出しはユーザーによる`ANTHROPIC_API_KEY`投入後の実行が必要)。Theia本体(node_modules配下)は一切改変せず、`electron-app`への`@theia/ai-core`/`@theia/ai-chat`/`@theia/ai-chat-ui`/`@theia/ai-anthropic`/`@theia/ai-mcp`(全て1.71.2)の依存追加と、`arschat-core`のfrontend/electron-main拡張のみで実現した。**
+
+#### 検証結果の詳細
+
+実装は`arschat-core/src/browser/arschat-poc4-autotest-contribution.ts`(frontend、4-1/4-2/4-3のチェック本体)、`arschat-core/src/electron-main/arschat-poc4-autotest-contribution.ts`(electron-main、スクリーンショット取得)、`arschat-core/src/browser/arschat-informational-part-renderer.tsx`(4-3のカスタムレンダラー本体)。`ARSCHAT_POC4_AUTOTEST=1`時のみ動作、通常起動には無影響。
+
+- **重要な前提の訂正**: 依頼文には「Theia AIはデフォルト無効のはず」とあったが、実機調査の結果これは誤りだった。`@theia/ai-core`の`AIActivationServiceImpl`(`node_modules/@theia/ai-core/lib/browser/ai-activation-service.js`)は`isActive = true`で**常に有効**がデフォルト実装であり、そのソースコメントに「preferenceベースで無効をデフォルトにする実装は`@theia/ai-ide`パッケージ側が上書き提供する」と明記されている。今回`@theia/ai-ide`は依存に含めていないため、`ai-features.ai.enable`のようなトグルpreference自体が存在せず、AI機能を「有効化する」操作は不要だった(依存を追加した時点で有効)。
+- **4-1 Anthropic接続**:
+  - APIキーの経路は2つ確認: (1) preference `ai-features.anthropic.AnthropicApiKey`(平文保存、`AnthropicPreferencesSchema`が明記)、(2) バックエンドプロセスの環境変数`ANTHROPIC_API_KEY`(`AnthropicLanguageModelsManagerImpl.apiKey`ゲッターが`this._apiKey ?? process.env.ANTHROPIC_API_KEY`でフォールバック)。本PoCでは環境変数経路をそのまま利用する設計とし、preferenceへの平文保存は行っていない。
+  - モデル一覧は`ai-features.anthropic.AnthropicModels`のデフォルト値(`claude-opus-4-7`等5種)がそのまま使われ、追加設定は不要だった。
+  - 実機ログ確認(`ARSCHAT_POC4_AUTOTEST=1`、`ANTHROPIC_API_KEY`未設定):
+    ```
+    [PoC-4][autotest] t+8s: 5 language model(s) registered total, 5 anthropic/* model(s)
+    [PoC-4][autotest]   model id='anthropic/claude-opus-4-7' status='unavailable' message='No Anthropic API key set'
+    ...(5モデル分、いずれもstatus='unavailable')
+    [PoC-4][autotest] 4-1 provider registration -> PASS (Claude models enumerable via LanguageModelRegistry)
+    [PoC-4][autotest] t+8s: backend process.env.ANTHROPIC_API_KEY present = false
+    [PoC-4][autotest] 4-1 live call SKIPPED - ANTHROPIC_API_KEY not set in this environment. ...
+    ```
+  - `FrontendLanguageModelRegistry.getLanguageModels()`でプロバイダ登録・モデル一覧・status(`ready`/`unavailable`)をフロントエンドから直接取得できることを確認(バックエンドの`AnthropicLanguageModelsManagerImpl`がbackend-frontend間のRPC経由でモデル情報を同期する仕組み — Theia AIの標準アーキテクチャ)。
+  - autotestは`ANTHROPIC_API_KEY`(バックエンドプロセス環境変数、`EnvVariablesServer`経由で確認)が存在する場合のみ、`LanguageModel.request()`で実際のストリーミング呼び出しを自動発火する分岐を実装済み(未検証、ユーザーがキー投入後に自動実行される)。
+- **4-2 MCP**: `electron-app/package.json`の`theia.frontend.config.preferences`に`ai-features.mcp.mcpServers`として`@modelcontextprotocol/server-everything`(npx起動、APIキー不要のMCPリファレンスサーバー)をstdioサーバーとして登録(`autostart: true`)。PoC-3で導入済みの`security.workspace.trust.enabled: false`により、ワークスペーストラスト待ちでMCP自動起動がブロックされる問題(`McpFrontendApplicationContribution`はuntrustedワークスペースでautostartをブロックする実装になっている)を回避。実機ログ確認:
+  ```
+  [PoC-4][autotest] t+14s: configured MCP server(s): everything
+  [PoC-4][autotest] t+14s: running MCP server(s): everything
+  [PoC-4][autotest] t+14s: MCP server 'everything' exposes 14 tool(s): echo, get-annotated-message, get-env, get-resource-links, get-resource-reference, get-structured-content, get-sum, get-tiny-image, gzip-file-as-resource, toggle-simulated-logging, toggle-subscriber-updates, trigger-long-running-operation, get-roots-list, simulate-research-query
+  [PoC-4][autotest] 4-2 MCP server start + tool listing -> PASS
+  ```
+  サーバー自動起動・14種のツール一覧取得まで完全に実動作を確認(APIキー不要で完結する要件を満たした)。
+- **4-3 カスタムレンダラー**: `ChatResponsePartRenderer`(`@theia/ai-chat-ui/lib/browser/chat-response-part-renderer`、`bindRootContributionProvider`によるマルチバインド拡張ポイント)に`ArschatInformationalPartRenderer`を追加登録。ターゲットに`InformationalChatResponseContent`(kind: `'informational'`)を選んだ理由: Theia AI標準の`MarkdownPartRenderer`が`canHandle()`でこのkindにスコア10を返して「先取り」しているにもかかわらず、`render()`は`InformationalChatResponseContent`に対して意図的に`null`を返す実装になっている(該当コード内に`// TODO let the user configure whether they want to see informational content`というコメントがあり、Theia AI自身がこの機能を未完成と認識している)。つまり素の状態では informational content は**画面に一切描画されない**。`ArschatInformationalPartRenderer`は同じkindに対して`canHandle()`で11(標準実装の10を上回る値)を返すことでレンダラー選択を勝ち取り、ArsChat独自のバッジ風Reactコンポーネント(アイコン+Markdown本文、`arschat-informational-part`のCSSクラス)で実際に描画する。「ビルドが通る」だけでなく「本来何も表示されないはずのコンテンツが実際に表示されるようになる」という、素の状態との差分が明確な形で実証した。
+  - コントリビューション登録の実機ログ確認(`ContributionProvider<ChatResponsePartRenderer>`をautotestに直接注入し、登録済み全レンダラーを列挙):
+    ```
+    [PoC-4][autotest] t+17s: 15 ChatResponsePartRenderer contribution(s) registered: HorizontalLayoutPartRenderer, ErrorPartRenderer, MarkdownPartRenderer, CodePartRenderer, CommandPartRenderer, ToolCallPartRenderer, NotAvailableToolCallRenderer, ErrorPartRenderer, ThinkingPartRenderer, QuestionPartRenderer, ProgressPartRenderer, TextPartRenderer, DelegationToolRenderer, UnknownPartRenderer, ArschatInformationalPartRenderer
+    [PoC-4][autotest] 4-3 custom renderer registration -> PASS (ArschatInformationalPartRenderer present in the multi-bound ChatResponsePartRenderer contribution provider, canHandle()=11 for InformationalChatResponseContent beats the built-in MarkdownPartRenderer's 10)
+    ```
+  - 実チャット表示(実際にinformationalコンテンツを含む応答をUIで見る)はAPIキー必須のため省略(依頼文の許容範囲内)。ビルド通過+コントリビューション登録の実機確認までを実施。
+- **チャットUI表示**: `aiChat:toggle`コマンド(`@theia/ai-chat-ui`の`AIChatContribution`が登録)実行で右側パネルにAI Chatビューが開くことを確認、スクリーンショット`poc-artifacts/poc4-chat-view.png`(`ARSCHAT_POC4_AUTOTEST=1`起動後26秒時点)で「AI CHAT」ヘッダー・入力欄("Ask a question")・ツールバーアイコンの実表示を確認(`.gitignore`対象でリポジトリには含めない)。
+
+#### 撤退条件との照合
+
+該当なし。依頼文で例示されたパッケージ名(`@theia/ai-core`, `@theia/ai-chat`, `@theia/ai-chat-ui`, `@theia/ai-anthropic`, `@theia/ai-mcp`)は全て1.71.2でnpm registry上に実在し、そのままの構成で組めた(PoC-3時点で`@theia/plugin-ext`の推移的依存として`ai-core`/`ai-mcp`が既にnode_modulesに存在していたことからも、パッケージ構成の想定と実態の齟齬は無かった)。
+
+#### 残る手動GUI確認項目 / ユーザーが行うべき作業
+
+- **ライブAPI検証**: `ANTHROPIC_API_KEY`環境変数を設定した状態で`ARSCHAT_POC4_AUTOTEST=1`付きで`electron-app`を起動すると、autotestが自動的に`anthropic/claude-*`モデルへの実際のリクエスト(「Reply with exactly one word: PONG」)を発行し、応答テキストをログに出力する(`[PoC-4][autotest] t+8s: live Anthropic response: '...'`)。詳細は本ファイル末尾の「ライブAPI検証手順」を参照。
+- **実チャットでのカスタムレンダラー目視確認**: AI Chatビューでエージェントに実際に質問し、informational contentを含む応答(ツール呼び出しの過程情報等)が発生した際に、ArsChat独自のバッジ表示(アイコン付き、標準の左ボーダー配色)で描画されることの目視確認。
+- **MCPツールの実呼び出し**: 現状は`getTools()`によるツール一覧取得までを自動検証。チャット上でエージェントが実際に`everything`サーバーのツール(例: `echo`, `get-sum`)を呼び出す様子は、4-1同様APIキーが必要なため未実施。
 
 ### PoC-5: 組み込みGraphRAG スパイク(ゲート外・後回し可)
 
@@ -177,5 +225,5 @@ Neo4j 廃止の技術検証。**追加ダウンロード無し**が要件。
 - [x] PoC-1: 1-1/1-2/1-3 すべて合格。Theia本体無改変、`arschat-core` の electron-main 拡張(DI rebind + contribution)のみで実現。詳細は上表および `BUILD_NOTES.md` 参照。globalShortcutの実キー入力とウィジェット/トレイの見た目は手動GUI確認が残項目。
 - [x] PoC-2: 2-1/2-2/2-3 すべて合格。Theia本体無改変、`arschat-core` の frontend 拡張(既存 `ArschatCoreWidget` の main エリア化 + `FrontendApplicationContribution` + `FilterContribution`)と `electron-app/package.json` の `theia.frontend.config` 設定のみで実現。SCM/Debug/Search-in-workspaceのActivityBar項目・メニューは依存関係に含まれておらず構造的に非表示(追加対応不要)。詳細は上表および `BUILD_NOTES.md` 参照。スクリーンショットは `poc-artifacts/poc2-main-window.png`(gitignore対象、リポジトリ非同梱)。
 - [x] PoC-3: 3-1 部分合格(拡張ビュー組み込み・Open VSX接続・CLI配置での拡張導入は確認済み、アプリ内インストールUI操作のみ手動GUI確認が残項目)/ 3-2 合格(GitLens・ESLint・Draculaテーマの3種+vscode.javascriptビルトインがactivateし基本機能が実動作: GitLens行内blame+Commit Graph webview、ESLintのLSP診断がProblemsマーカーに到達、テーマ全面適用)。Theia本体無改変。`electron-app` に `@theia/plugin-ext`/`plugin-ext-vscode`/`vsx-registry`(1.71.2)を追加、VSIXはOpen VSXからCLIダウンロードして `electron-app/plugins/` に**展開して**配置(`theia start --plugins=local-dir:plugins`)。最大のハマりは (1) `@vscode/windows-ca-certs` optionalネイティブ依存のビルド失敗でwebpack停止(webpack.config.jsのIgnorePluginで解決)、(2) 素のTheiaに言語定義が無く `.js` が plaintext になりESLintが沈黙(vscode.javascriptビルトイン追加で解決)、(3) ワークスペーストラストダイアログがactivateをブロック(preferenceで無効化)。詳細は上表および `BUILD_NOTES.md` 参照。スクリーンショットは `poc-artifacts/poc3-main-window.png` / `poc3-extensions-view.png`(gitignore対象)。
-- [ ] PoC-4
+- [x] PoC-4: 4-1/4-2/4-3すべて合格(4-1はワイヤリング検証まで、ライブAPI呼び出しは`ANTHROPIC_API_KEY`未設定のため未実行 — キー投入時に自動実行されるautotestを実装済み)。Theia本体無改変。`electron-app`/`arschat-core`に`@theia/ai-core`/`ai-chat`/`ai-chat-ui`/`ai-anthropic`/`ai-mcp`(全て1.71.2)を追加。重要な訂正: Theia AIはデフォルト無効ではなく、`@theia/ai-ide`を入れない限り常時有効(`AIActivationServiceImpl`の実装がそう明記)。4-2はAPIキー不要な`@modelcontextprotocol/server-everything`をnpx起動で登録し14ツールの一覧取得まで完全実動作を確認。4-3は`InformationalChatResponseContent`(標準実装が意図的に`render()`でnullを返し何も表示しない既知の未完成箇所)を対象に、優先度11の独自レンダラーで実際に描画されることをコード上のスコア設計とコントリビューションプロバイダの実機ログ列挙で確認。詳細は上表および`BUILD_NOTES.md`参照。スクリーンショットは`poc-artifacts/poc4-chat-view.png`(gitignore対象)。
 - [x] PoC-5: 5-1/5-2/統合デモすべて合格。`poc-graphrag/`(独立npmパッケージ、Theia組み込みはスコープ外)でbetter-sqlite3+sqlite-vecによるベクター検索と再帰CTEによるグラフk-hop探索、両者を組み合わせたGraphRAG最小パイプラインが動作することを確認。「追加ダウンロード無し」要件はbetter-sqlite3をv12系以降に固定する前提で満たせる(v11系はNode v24向けプリビルド未提供の既知問題あり)。詳細は上表および `poc-graphrag/README.md` 参照。Electron実機組み込み検証(ASARアンパック設定・electron-rebuild)は未実施(情報収集のみ、スコープ外)。

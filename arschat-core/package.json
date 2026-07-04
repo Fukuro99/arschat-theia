@@ -15,6 +15,11 @@
     "src"
   ],
   "dependencies": {
+    "@theia/ai-anthropic": "1.71.2",
+    "@theia/ai-chat": "1.71.2",
+    "@theia/ai-chat-ui": "1.71.2",
+    "@theia/ai-core": "1.71.2",
+    "@theia/ai-mcp": "1.71.2",
     "@theia/core": "1.71.2",
     "@theia/editor": "1.71.2",
     "@theia/markers": "1.71.2",

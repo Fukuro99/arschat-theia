@@ -4,6 +4,11 @@
   "version": "0.0.1",
   "main": "lib/backend/electron-main.js",
   "dependencies": {
+    "@theia/ai-anthropic": "1.71.2",
+    "@theia/ai-chat": "1.71.2",
+    "@theia/ai-chat-ui": "1.71.2",
+    "@theia/ai-core": "1.71.2",
+    "@theia/ai-mcp": "1.71.2",
     "@theia/core": "1.71.2",
     "@theia/editor": "1.71.2",
     "@theia/electron": "1.71.2",
@@ -40,7 +45,14 @@
         "preferences": {
           "workbench.statusBar.visible": false,
           "workbench.colorTheme": "Dracula Theme",
-          "security.workspace.trust.enabled": false
+          "security.workspace.trust.enabled": false,
+          "ai-features.mcp.mcpServers": {
+            "everything": {
+              "command": "npx",
+              "args": ["-y", "@modelcontextprotocol/server-everything"],
+              "autostart": true
+            }
+          }
         }
       }
     }

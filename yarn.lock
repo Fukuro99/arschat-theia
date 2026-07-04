@@ -2,6 +2,13 @@
 # yarn lockfile v1
 
 
+"@anthropic-ai/sdk@^0.65.0":
+  version "0.65.0"
+  resolved "https://registry.yarnpkg.com/@anthropic-ai/sdk/-/sdk-0.65.0.tgz#3f464fe2029eacf8e7e7fb8197579d00c8ca7502"
+  integrity sha512-zIdPOcrCVEI8t3Di40nH4z9EoeyGZfXbYSvWdDLsB/KkaSYMnEgC7gmcgWu83g2NTn1ZTpbMvpdttWDGGIk6zw==
+  dependencies:
+    json-schema-to-ts "^3.1.1"
+
 "@babel/code-frame@^7.0.0", "@babel/code-frame@^7.10.4", "@babel/code-frame@^7.12.13", "@babel/code-frame@^7.29.7":
   version "7.29.7"
   resolved "https://registry.yarnpkg.com/@babel/code-frame/-/code-frame-7.29.7.tgz#f2fbbfea87c44a21590ec515b778b2c26d8866e7"
@@ -887,7 +894,7 @@
     "@babel/types" "^7.4.4"
     esutils "^2.0.2"
 
-"@babel/runtime@^7.12.5", "@babel/runtime@^7.20.13", "@babel/runtime@^7.29.2":
+"@babel/runtime@^7.12.5", "@babel/runtime@^7.18.3", "@babel/runtime@^7.20.13", "@babel/runtime@^7.29.2":
   version "7.29.7"
   resolved "https://registry.yarnpkg.com/@babel/runtime/-/runtime-7.29.7.tgz#12022450c45a4da6d8d8287b18a4ff2ddb23f768"
   integrity sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==
@@ -1637,6 +1644,50 @@
     "@babel/runtime" "^7.12.5"
     "@testing-library/dom" "^9.0.0"
     "@types/react-dom" "^18.0.0"
+
+"@theia/ai-anthropic@1.71.2":
+  version "1.71.2"
+  resolved "https://registry.yarnpkg.com/@theia/ai-anthropic/-/ai-anthropic-1.71.2.tgz#dd436d95ac6743b7943dfd03aa81df612c420306"
+  integrity sha512-pEQ/2J1ZYhl2x9M3Q7qa53OH3uvRvhwpgiSFeS/WzK7NOi2ZI5scBQWvWh0IvhoB4L1oziC/YYa0ImKcrdnLeA==
+  dependencies:
+    "@anthropic-ai/sdk" "^0.65.0"
+    "@theia/ai-core" "1.71.2"
+    "@theia/core" "1.71.2"
+
+"@theia/ai-chat-ui@1.71.2":
+  version "1.71.2"
+  resolved "https://registry.yarnpkg.com/@theia/ai-chat-ui/-/ai-chat-ui-1.71.2.tgz#4426d07456d35aada79516ef03280724e994b8f0"
+  integrity sha512-6MseBLw/wHkdTBxXxxrEydsvYMv+7SqVikzMu6E4uNQSFMDEpupNIQHHTs0qApmKjH8NmfwbKabE8NsKNPvTkQ==
+  dependencies:
+    "@theia/ai-chat" "1.71.2"
+    "@theia/ai-core" "1.71.2"
+    "@theia/core" "1.71.2"
+    "@theia/editor" "1.71.2"
+    "@theia/editor-preview" "1.71.2"
+    "@theia/filesystem" "1.71.2"
+    "@theia/monaco" "1.71.2"
+    "@theia/monaco-editor-core" "1.108.201"
+    "@theia/preferences" "1.71.2"
+    "@theia/workspace" "1.71.2"
+    date-fns "^4.1.0"
+    tslib "^2.6.2"
+    uuid "^9.0.1"
+
+"@theia/ai-chat@1.71.2":
+  version "1.71.2"
+  resolved "https://registry.yarnpkg.com/@theia/ai-chat/-/ai-chat-1.71.2.tgz#eaaf6124effcbbc17a7035f7da12c8cd637a8f81"
+  integrity sha512-2gtwZRXz1XWd8rvTUSkJCIReJUOEfgH/06y81uw0CkqUJz3R438/BNH3sOX5HksFWNDT5tKVJvldapa6eqi1cQ==
+  dependencies:
+    "@theia/ai-core" "1.71.2"
+    "@theia/core" "1.71.2"
+    "@theia/editor" "1.71.2"
+    "@theia/file-search" "1.71.2"
+    "@theia/filesystem" "1.71.2"
+    "@theia/monaco" "1.71.2"
+    "@theia/monaco-editor-core" "1.108.201"
+    "@theia/workspace" "1.71.2"
+    js-yaml "^4.1.1"
+    tslib "^2.6.2"
 
 "@theia/ai-core@1.71.2":
   version "1.71.2"
@@ -4762,6 +4813,11 @@ data-urls@^3.0.2:
     whatwg-mimetype "^3.0.0"
     whatwg-url "^11.0.0"
 
+date-fns@^4.1.0:
+  version "4.4.0"
+  resolved "https://registry.yarnpkg.com/date-fns/-/date-fns-4.4.0.tgz#806539edf45c616b2b76b5f78b88c56ed3c7e036"
+  integrity sha512-+1UMbeh68lH1SegH83CGWwpb6OHHbpSgr3+s5Eww5M4CAgswBpoWS0AjTOfEJ33HiYKz1hdj/KTFprzXHmq/6w==
+
 dateformat@^3.0.0:
   version "3.0.3"
   resolved "https://registry.yarnpkg.com/dateformat/-/dateformat-3.0.3.tgz#a6e37499a4d9a9cf85ef5872044d62901c9889ae"
@@ -7421,6 +7477,14 @@ json-parse-even-better-errors@^2.3.0:
   version "2.3.1"
   resolved "https://registry.yarnpkg.com/json-parse-even-better-errors/-/json-parse-even-better-errors-2.3.1.tgz#7c47805a94319928e05777405dc12e1f7a4ee02d"
   integrity sha512-xyFwyhro/JEof6Ghe2iz2NcXoj2sloNsWr/XsERDK/oiPCfaNhl5ONfp+jQdAZRQQ0IJWNzH9zIZF7li91kh2w==
+
+json-schema-to-ts@^3.1.1:
+  version "3.1.1"
+  resolved "https://registry.yarnpkg.com/json-schema-to-ts/-/json-schema-to-ts-3.1.1.tgz#81f3acaf5a34736492f6f5f51870ef9ece1ca853"
+  integrity sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g==
+  dependencies:
+    "@babel/runtime" "^7.18.3"
+    ts-algebra "^2.0.0"
 
 json-schema-traverse@^0.4.1:
   version "0.4.1"
@@ -10800,6 +10864,11 @@ trim-repeated@^1.0.0:
   integrity sha512-pkonvlKk8/ZuR0D5tLW8ljt5I8kmxp2XKymhepUeOdCEfKpZaktSArkLHZt76OB1ZvO9bssUsDty4SWhLvZpLg==
   dependencies:
     escape-string-regexp "^1.0.2"
+
+ts-algebra@^2.0.0:
+  version "2.0.0"
+  resolved "https://registry.yarnpkg.com/ts-algebra/-/ts-algebra-2.0.0.tgz#4e3e0953878f26518fce7f6bb115064a65388b7a"
+  integrity sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==
 
 ts-jest@^29.1.0:
   version "29.4.11"
