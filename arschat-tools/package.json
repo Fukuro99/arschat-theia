@@ -36,7 +36,8 @@
   },
   "theiaExtensions": [
     {
-      "frontend": "lib/browser/arschat-tools-frontend-module"
+      "frontend": "lib/browser/arschat-tools-frontend-module",
+      "backend": "lib/node/arschat-tools-backend-module"
     }
   ]
 }

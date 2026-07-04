@@ -665,3 +665,49 @@ M3 のモック LanguageModel 方式を流用し、**モックが受け取った
 1. **jest が browser confirmation-bindings で死ぬ**: widget が `ToolConfirmationManager`(`@theia/ai-chat/lib/browser/chat-tool-preference-bindings`)を inject するようになった途端、jest が同モジュール→`trust-aware-preference-reader`→`@theia/core/src/browser`(hover-service.tsx 等の DOM ツリー)を辿って `Unexpected token ':'` で落ちた(node_modules は transform-ignore)。widget は**このクラスを DI トークンとしてしか使わない**(メソッドはテストで定数 bind して差し替え)ので、jest の `moduleNameMapper` で当該 browser モジュールだけを軽量スタブ(`configs/stubs/chat-tool-preference-bindings.js`、空クラス)に差し替えて解決。common 側の `ToolConfirmationMode`(enum)や `ToolCallChatResponseContentImpl` は browser を引かないのでそのまま使える。
 2. **`confirmAlwaysAllow` の意味論**: 「毎回確認」を出すのに preference を書き換えるのではなく、ツール側の `confirmAlwaysAllow` フラグを立てるのが正解(`getConfirmationMode` が既定 CONFIRM に落とし、かつグローバル `'*': ALWAYS_ALLOW` の上書きも無効化する)。文字列を渡すと always-allow 昇格時の警告文にもなる(`WRITE_TOOL_CONFIRM_WARNING`)。二重の役割を1フラグが担う。
 3. **e-2 の handler 戻り型**: read_file の truncation テストで `handler(...)` の戻りが `string | object | ToolCallContent` なので `as string` キャストが要る(ToolRequest.handler の union 型)。
+
+## Phase 1 M5 実装メモ (e-4: run_command を承認必須で実装、arschat-tools 初の backend + RPC)
+
+作成: 2026-07-05 / 対象: PHASE1_DESIGN.md §7・§9 M5(e-4)。ArsChat の `code-editor-manager.ts`(`runCommand`/`detectWindowsShell`)を移植し、**シェルコマンド実行ツール `run_command` を承認必須**で追加。e-2/e-3 は frontend のみだったが、コマンド実行は Node が要るので **arschat-tools 初の backend モジュール + JSON-RPC** を導入した。**Theia 本体は一切改変せず**、Theia 1.71.2 の `RpcConnectionHandler`/`RemoteConnectionProvider` にそのまま乗せた。
+
+### backend/frontend の配線(RPC をどう張ったか)
+
+コマンド実行(spawn)は Node 依存なので frontend bundle には置けない。Theia 標準の JSON-RPC で frontend ToolProvider → backend service を繋いだ(先例=`@theia/file-search` の `FileSearchService`、実ソースで裏取り)。
+
+- **共有プロトコル** `src/common/command-runner-protocol.ts`: service path 定数 `commandRunnerServicePath='/services/arschat-run-command'`、DI symbol `CommandRunnerService`、`RunCommandRequest`/`RunCommandResult` 型。**Theia ランタイム非依存**(plain symbol + interface のみ)なので node/browser 双方から import しても browser/DOM を node build に引き込まない(tool-ids.ts と同じ規律)。
+- **backend impl** `src/node/command-runner-service-impl.ts`: `@injectable` な `CommandRunnerServiceImpl`。実際に `spawn` する唯一の場所。
+- **backend module** `src/node/arschat-tools-backend-module.ts`: `bind(CommandRunnerService).to(Impl)` + `bind(ConnectionHandler).toDynamicValue(ctx => new RpcConnectionHandler(commandRunnerServicePath, () => ctx.container.get(CommandRunnerService)))`。file-search の backend module と 1:1。
+- **package.json** `theiaExtensions` に `"backend": "lib/node/arschat-tools-backend-module"` を frontend と同じエントリに追記(`arschat-branding` の `electronMain` 宣言が先例)。→ 生成 `electron-app/src-gen/backend/server.js` に `load(require('arschat-tools/lib/node/arschat-tools-backend-module'))` が入るのを確認。
+- **frontend proxy** `src/browser/arschat-tools-frontend-module.ts`: `bind(CommandRunnerService).toDynamicValue(ctx => ctx.container.get<ServiceConnectionProvider>(RemoteConnectionProvider).createProxy<CommandRunnerService>(commandRunnerServicePath))`。ai-mcp が使う `RemoteConnectionProvider`(1.71.2 推奨の RPC エントリ)を採用。
+- **frontend provider** `src/browser/run-command-tool-provider.ts`: `ToolProvider` かつ `CommandToolBackend`。`getTool()` は pure factory `createRunCommandTool(this)` に委譲。**cwd 解決を frontend が担う**: `WorkspaceService.tryGetRoots()`(無ければ `EnvVariablesServer.getHomeDirUri()`)で絶対 FS パスにしてから RPC に渡す → backend はワークスペース知識ゼロの純粋コマンドランナーに保てる。`run()` は proxy の `runCommand()` を呼ぶだけ。
+- **承認**: ToolRequest に `confirmAlwaysAllow`(文字列警告 `RUN_COMMAND_CONFIRM_WARNING`)を付与。e-3 の汎用フロー(`ToolConfirmationManager` が CONFIRM に落とす → ArschatChatWidget が承認カード描画 → confirm/deny)にそのまま乗る。受入①(承認→許可→実行→結果)②(拒否で未実行・denial が LLM に返る)③(「すべて許可」でも毎回確認)は e-3 側で構造的に達成、e-4 は「フラグを立てる」だけ。
+
+### 移植元の2つの穴の修正
+
+1. **出力上限なし** → `common/run-command.ts` の `truncateOutput(stdout, stderr, max=50_000)`。stdout 優先で combined 長を `RUN_COMMAND_MAX_OUTPUT_CHARS`(read_file の `READ_FILE_MAX_CHARS` と同値)に収め、切った側に `...(truncated)` を付す。stderr の予算がマーカー未満なら bare marker で上限超過しないよう stderr を落とす(テストで combined ≤ max を検証)。
+2. **timeout 時 `proc.kill()` のみでプロセスツリー残留** → `killTree(proc)`:
+   - **Windows**: `taskkill /pid <pid> /T /F`(/T=ツリー /F=強制)。**選定理由**: win32 には POSIX の process-group kill が無く(Node の `process.kill(-pid)` は Windows 非対応)、`taskkill /T` が子孫まで確実に終わらせる Windows 標準手段。ビルドがコンパイラを、`npm` が node を spawn した子孫まで届く。失敗時(既に終了済み等)は `proc.kill()` にフォールバック。
+   - **POSIX**: shell を `spawn(cmd, { shell:true, detached:true })` で起動 → setsid 相当で**自分がプロセスグループのリーダー**になる。timeout 時 `process.kill(-pid, 'SIGKILL')` で**グループ全体**に SIGKILL。**選定理由**: 素の `proc.kill()` はシェルにしか届かず孫プロセスを取りこぼす。負 pid のグループ kill が最小コストで孫まで一掃できる。失敗時は `proc.kill('SIGKILL')` にフォールバック。
+
+### pure ロジック分離(unit テスト可能に)
+
+`common/run-command.ts` に Theia/child_process 非依存で切り出し: `buildShellInvocation(command, shell)`(pwsh=UTF-8 プリアンブル+`-NoProfile -Command`、cmd=`chcp 65001 >nul 2>&1 & …`、posix=`{shell:true}` の raw 実行)、`truncateOutput()`、各定数。backend impl は「pwsh 探査(`execSync` probe、3s)→ shell 決定 → `buildShellInvocation` で argv 組立 → spawn」だけを担い、分岐と truncation は node jest で spawn 抜きに検証。
+
+### 検証結果(正直に)
+
+- **jest: arschat-tools 33/33 PASS**(e-3 の 14 から +19)。内訳: `run-command.test.ts` 9(shell 引数組立 pwsh/cmd/posix・特殊文字保持・truncation の各ケース=小/巨大 stdout/combined 上限/custom max)、`command-tool-request.test.ts` 8(ToolRequest shape=confirm 必須・cwd 既定解決・cwd/timeout 透過・結果整形・空コマンド拒否・backend 失敗の ERROR 整形・formatRunResult の timeout/truncated 表示・空 stream プレースホルダ)、**`command-runner-service-impl.test.ts` 3(実 spawn smoke)**: `echo` 出力が返る/非0 exit code 伝播/**timeout で実際にツリー kill され exitCode -1・timedOut・`[timeout]`・全時間待たず終了を確認**(受入⑥=backend サービス単体の RPC ターゲット動作を実プロセスで裏取り)。
+- **回帰なし**: arschat-chat 14/14・arschat-agents 11/11。
+- **ビルド**: `yarn build:electron` webpack **`compiled successfully`**。全パッケージ `tsc` エラー0。生成 backend bundle に `../arschat-tools/lib/node/*.js` 2 module、`src-gen/backend/server.js` に backend module の `load(...)` を確認。
+- **ライブ検証(実キーでの LLM 往復)**: 依頼どおり **e-4 では不要**(e-10 に集約)。ただし backend サービスは上記 smoke テストで実 `echo`/timeout kill まで実プロセスで動作確認済み。
+
+### e-5(web_search/fetch_page — これも backend 処理)への引き継ぎ
+
+**backend ツールを追加する手順は、e-4 で足場が済んだので次からは frontend 承認ツール(e-3)+ RPC 1 本 = 実質 6 ステップ**:
+1. `common/<x>-protocol.ts` に service path 定数 + DI symbol + Request/Result 型を定義(**Theia 非依存**を厳守=node/browser 両 build を汚さない)。
+2. `common/<x>.ts`(pure ロジック)+ `common/<x>-tool-request.ts`(`createXTool(backend)` factory、`confirmAlwaysAllow` 付与)。
+3. `node/<x>-service-impl.ts` に `@injectable` 実装。
+4. `node/arschat-tools-backend-module.ts` に `bind(Service).to(Impl)` + `ConnectionHandler`(RpcConnectionHandler)を**追記**(module は既に存在。複数サービスは ConnectionHandler を複数 bind するだけ)。
+5. `browser/<x>-tool-provider.ts`(ToolProvider、getTool は factory 委譲、backend は RPC proxy 呼び出し)+ frontend module に proxy bind と `bindToolProvider` 追記。
+6. `common/tool-ids.ts` の `ARSCHAT_ALL_TOOL_IDS` に新 id を追加(registration contribution が自動で拾って agent に載せる)。
+
+**注意点**: (a) web_search/fetch_page は外部 HTTP を叩くので Node の `fetch`/`undici` は backend でのみ。CORS 回避のためにも backend 処理は正解。(b) 出力(検索結果本文・ページ HTML)は run_command と同じく**巨大化しがち → `truncateOutput` 相当の上限を必ず入れる**(50_000 char 慣習を踏襲)。(c) タイムアウト・エラーの result 型は run_command の `{ok/exitCode, truncated, timedOut}` を参考に。(d) `theiaExtensions.backend` は既に宣言済みなので**追加のパッケージ配線は不要**、新サービスの ConnectionHandler を足すだけ。

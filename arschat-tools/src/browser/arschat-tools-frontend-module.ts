@@ -1,9 +1,12 @@
 // *****************************************************************************
-// ArsChat tools extension - frontend DI module (PHASE1_DESIGN.md §7, M5 e-2).
+// ArsChat tools extension - frontend DI module (PHASE1_DESIGN.md §7, M5 e-2/e-4).
 //
-// Wires the first three AI tools (read_file / write_file / edit_file) as
-// @theia/ai-core ToolProviders and attaches them to the active ArsChat
-// ChatAgent so the model can actually call them from a chat request.
+// Wires the AI tools (read_file / write_file / edit_file from e-2/e-3, plus
+// run_command from e-4) as @theia/ai-core ToolProviders and attaches them to the
+// active ArsChat ChatAgent so the model can call them from a chat request.
+// run_command differs: its heavy lifting runs on the *backend* (spawn needs Node),
+// reached through a JSON-RPC proxy bound here from commandRunnerServicePath; the
+// backend module (../node/arschat-tools-backend-module) serves the impl.
 //
 // ---- Wiring, layer by layer -------------------------------------------------
 //   1. ArschatFileToolsService  (browser/): the single FileService/Workspace
@@ -37,14 +40,16 @@
 
 import { ContainerModule, interfaces, injectable, inject } from '@theia/core/shared/inversify';
 import { ILogger } from '@theia/core';
-import { FrontendApplicationContribution } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution, RemoteConnectionProvider, ServiceConnectionProvider } from '@theia/core/lib/browser';
 import { ToolInvocationRegistry, bindToolProvider } from '@theia/ai-core/lib/common/tool-invocation-registry';
 import { ArschatChatAgent } from 'arschat-agents/lib/browser/arschat-chat-agent';
 import { ArschatFileToolsService } from './arschat-file-tools-service';
 import { ReadFileToolProvider } from './read-file-tool-provider';
 import { WriteFileToolProvider } from './write-file-tool-provider';
 import { EditFileToolProvider } from './edit-file-tool-provider';
-import { ARSCHAT_FILE_TOOL_IDS } from '../common/tool-ids';
+import { RunCommandToolProvider } from './run-command-tool-provider';
+import { ARSCHAT_ALL_TOOL_IDS } from '../common/tool-ids';
+import { CommandRunnerService, commandRunnerServicePath } from '../common/command-runner-protocol';
 
 @injectable()
 export class ArschatToolsRegistrationContribution implements FrontendApplicationContribution {
@@ -59,14 +64,14 @@ export class ArschatToolsRegistrationContribution implements FrontendApplication
     protected readonly logger!: ILogger;
 
     onStart(): void {
-        // The three ToolProviders were already collected into the registry by
-        // ToolInvocationRegistryImpl.init(); resolve exactly ours by id.
-        const tools = this.toolRegistry.getFunctions(...ARSCHAT_FILE_TOOL_IDS);
+        // All ToolProviders (file tools + run_command) were already collected into
+        // the registry by ToolInvocationRegistryImpl.init(); resolve exactly ours by id.
+        const tools = this.toolRegistry.getFunctions(...ARSCHAT_ALL_TOOL_IDS);
         this.agent.setToolRequests(tools);
         const resolved = tools.map(t => t.id).join(', ') || '<none>';
-        this.logger.info(`[arschat-tools] attached ${tools.length} file tool(s) to ArsChat agent: ${resolved}`);
-        if (tools.length !== ARSCHAT_FILE_TOOL_IDS.length) {
-            this.logger.warn(`[arschat-tools] expected ${ARSCHAT_FILE_TOOL_IDS.length} tools (${ARSCHAT_FILE_TOOL_IDS.join(', ')}) `
+        this.logger.info(`[arschat-tools] attached ${tools.length} tool(s) to ArsChat agent: ${resolved}`);
+        if (tools.length !== ARSCHAT_ALL_TOOL_IDS.length) {
+            this.logger.warn(`[arschat-tools] expected ${ARSCHAT_ALL_TOOL_IDS.length} tools (${ARSCHAT_ALL_TOOL_IDS.join(', ')}) `
                 + `but the registry only resolved ${tools.length}. Check ToolProvider bindings.`);
         }
     }
@@ -75,11 +80,20 @@ export class ArschatToolsRegistrationContribution implements FrontendApplication
 export function bindArschatTools(bind: interfaces.Bind): void {
     bind(ArschatFileToolsService).toSelf().inSingletonScope();
 
-    // Register the three ToolProviders (each bound to self + as a ToolProvider
+    // run_command's backend runs over JSON-RPC: bind a proxy to the
+    // CommandRunnerService symbol from the shared service path (RemoteConnectionProvider
+    // is Theia's RPC entry point; same pattern as @theia/file-search / @theia/ai-mcp).
+    bind(CommandRunnerService).toDynamicValue(ctx => {
+        const provider = ctx.container.get<ServiceConnectionProvider>(RemoteConnectionProvider);
+        return provider.createProxy<CommandRunnerService>(commandRunnerServicePath);
+    }).inSingletonScope();
+
+    // Register the ToolProviders (each bound to self + as a ToolProvider
     // contribution, per bindToolProvider's contract).
     bindToolProvider(ReadFileToolProvider, bind);
     bindToolProvider(WriteFileToolProvider, bind);
     bindToolProvider(EditFileToolProvider, bind);
+    bindToolProvider(RunCommandToolProvider, bind);
 
     // Attach the resolved tools to the ArsChat agent on startup.
     bind(ArschatToolsRegistrationContribution).toSelf().inSingletonScope();
