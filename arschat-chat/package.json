@@ -4,7 +4,7 @@
     "theia-extension"
   ],
   "version": "0.0.1",
-  "description": "ArsChat chat UI: main-area chat ReactWidget + view contribution (dummy UI for now, real implementation lands in M3)",
+  "description": "ArsChat chat UI: main-area chat ReactWidget (streaming, Markdown+syntax highlight, <think> folding, image attach, abort) + session history panel view",
   "author": "Fukuro99",
   "license": "MIT",
   "files": [
@@ -16,7 +16,12 @@
     "@theia/ai-chat-ui": "1.71.2",
     "@theia/ai-core": "1.71.2",
     "@theia/core": "1.71.2",
-    "arschat-providers": "0.0.1"
+    "@theia/filesystem": "1.71.2",
+    "@theia/workspace": "1.71.2",
+    "arschat-providers": "0.0.1",
+    "dompurify": "^3.1.0",
+    "highlight.js": "^11.9.0",
+    "marked": "^14.0.0"
   },
   "devDependencies": {
     "rimraf": "^5.0.0",

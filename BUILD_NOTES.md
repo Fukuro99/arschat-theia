@@ -487,3 +487,53 @@ M2冒頭で node_modules を読み(改変なし)、§4.2/§10 の未確認事項
 3. **custom endpoint の LanguageModel id が無プレフィックス**: 上述の通り official は `openai/` 付き、custom は生 id。最初 `openai/lmstudio` になると勘違いしかけたが、`createCustomModelDescriptionsFromPreferences` を読んで `id: pref.id ?? pref.model` と確定。ProviderSwitchService の `fixedModelId` で吸収した。
 4. **GUIレス環境のスクリーンショットが loading spinner のまま撮れる**: この環境ではワークベンチシェルの attach が frontend page start から ~30秒と遅く、電メイン側の固定ディレイ(t+18s)では読み込み中オーバーレイ(~6KB PNG)しか撮れなかった。対策として capturePage をリトライ化し、**PNGサイズがしきい値(30KB)未満なら「まだ描画前」と判断して4秒間隔でリトライ**、描画済みシェル(~94KB)を撮れるまで待つ方式にした(`show()`/`focus()`/`moveTop()` でサーフェス可用化も併用)。M1 の「初回失敗・再runで成功」の揺らぎを、単一runで自己解決する形に強化。
 5. **`ChatService.getAgent` によるルーティング**: `ChatService.sendRequest` は `getAgent(parsedRequest, session)` でハンドラを決める(pinnedAgent / @mention / default agent)。ArsChat agent に確実に流すため、`createSession(undefined, { focus: false }, agent)` で agent を **pinnedAgent** として渡す方式にした(default agent preference に依存しない)。
+
+## Phase 1 M3 実装メモ (自前チャットWidget + セッション永続化 + 履歴パネル)
+
+作成: 2026-07-04 / 対象: PHASE1_DESIGN.md §5・§9 M3。M2 のダミー UI を本実装に格上げし、標準 `ChatSessionStore` によるセッション永続化と左サイドバー履歴パネルを追加した。**Theia本体(node_modules配下)は一切改変していない。全パッケージ 1.71.2 ピン留め維持。旧 ArsChat は参照のみ(ChatWindow.tsx / MessageBubble.tsx の UX)。**
+
+### 実装構成(arschat-chat)
+
+- `arschat-chat-widget.tsx`(本実装): streaming 表示は旧 ChatWindow の `pendingChunksRef`/`rafIdRef` を踏襲し **requestAnimationFrame バッチ描画**(`scheduleRender()`/`flushRender()`)。応答は `ChatResponseModel.onDidChange` で `content[].asString()` を連結。Markdown は自前ユーティリティ、`<think>` は自前パーサで折り畳み表示。画像は貼り付け(`onPaste`)+ドラッグ&ドロップ(`onDrop`/`onDragOver`)で `pendingImages` に溜め、送信時に `ImageContextVariable.createRequest` へ変換して `ChatRequest.variables` に載せる。送信中は **中断ボタン**(`ChatService.cancelRequest(sessionId, requestId)`、requestId は `invocation.requestCompleted` から取得)。M2 のプロバイダ/モデルドロップダウンは維持。
+- `arschat-markdown.ts`: **marked 14 + highlight.js + DOMPurify**。§5 が求めた「@theia/core の MarkdownRenderer が使えるか確認」に対する結論は BUILD_NOTES下部「判断: markdownライブラリ」参照。`code` レンダラを override して highlight.js で色付け、出力を DOMPurify でサニタイズしてから `dangerouslySetInnerHTML`。依存は **遅延 require**(module-eval で例外を出すと frontend DI モジュールごと落ちるため、初回描画時に解決)。
+- `arschat-think.ts`: 旧 MessageBubble の `parseThinkBlocks` を移植(完全ペア / 孤立クローズ / 未クローズ=思考中 の3ケース)。**Theia の stream パーサは `<think>` テキストタグを thinking パートに変換しない**(native reasoning part のみ変換。`chat-agents.js` 実測)。従って `<think>` は自前で処理する必要がある。
+- `arschat-history-widget.tsx` + `arschat-history-contribution.ts`: 左エリアの View。`ChatService.getPersistedSessions()`(= `ChatSessionStore.getSessionIndex()`)で一覧を日時降順表示、クリックで `getOrRestoreSession()` → Widget に復元、新規/削除も。
+- `arschat-chat-ui-service.ts`: Widget ⇄ 履歴パネルの疎結合用シングルトン(Emitter 4本)。相互 import による循環を回避。
+- autotest: frontend `arschat-m3-autotest-contribution.ts`(モック LanguageModel 登録 + streaming 往復 + 永続化/復元検証)、electron-main `arschat-branding/.../arschat-m3-autotest-contribution.ts`(スクショ)。
+
+### セッション永続化(§5 の確定方針どおり、自前ストア不要)
+
+- electron-app `theia.frontend.config.preferences` に `ai-features.chat.persistedSessionLimit: -1`(無制限)/ `ai-features.chat.sessionStorageScope: "global"` を追加。**default は `workspace` なので global 明示が必須**(node_modules 実測: `SESSION_STORAGE_PREF` default='workspace')。
+- `ChatSessionStore` / `ChatSessionNamingService` は **ai-chat の frontend module が既に bind 済み**(`ai-chat-frontend-module.js` 実測)。追加 bind 不要。
+- `ChatServiceImpl` が **自動保存**(model 変更を 500ms debounce, maxWait 5s)・タイトル変更時保存・**自動タイトル付け**(`ChatSessionNamingService`)・削除時のストア削除を全部やる。保存先は global スコープで `${configDir}/chatSessions/<sessionId>.json` + `index.json`。→ ArsChat 側は「保存」を一切書いていない。§4「タイトル自動設定」も標準命名サービスで満たされる(最初のユーザーメッセージ由来)。
+
+### 画像添付の実現方式(§5 が「断念可」とした項目 → **実装完了・断念せず**)
+
+Theia AI 1.71.2 の `ChatRequest` には画像フィールドが無い(`text`/`variables`/`displayText`/... のみ)。**画像は variable/context 経由**で渡す:
+
+- `@theia/ai-chat` の `ImageContextVariable.createRequest({ data(base64), mimeType, name })` で `AIVariableResolutionRequest` を作り、`ChatRequest.variables` に載せて `sendRequest`。
+- `ChatService.sendRequest` が `resolveChatContext` で variable を解決 → `request.context.variables` に入る。
+- `AbstractChatAgent`(`chat-agents.js` L240-264 実測)が resolved image context variable を **`ImageMessage`(`type:'image'`, base64)** に変換して LLM に渡す。inline image(パース済みパート)も別途拾う。
+- ArsChat 側 UI: クリップボード貼り付け(`ClipboardEvent.items` の `image/*`)+ドラッグ&ドロップ(`DataTransfer.files`)→ `FileReader.readAsDataURL` で base64 化 → 送信欄下にサムネイル+削除ボタン、送信後はユーザーバブルにサムネイル表示。
+- 結論: **マルチモーダル対応プロバイダ(Anthropic/OpenAI)ではそのまま画像がモデルに届く経路が Theia 標準にあり、自前は「添付UI + 送信時 variable 変換」だけで足りる。M3 スコープから外さずに実装。**
+
+### 判断: markdown ライブラリ(@theia/core の MarkdownRenderer は不採用)
+
+`@theia/core` に `MarkdownRenderer`(markdown-it ベース)は在る。しかし `render()` は HTMLElement を返し、コードブロックのハイライトは非同期 `codeBlockRenderer`(Monaco トークナイザ)前提で、**チャンク毎に再描画する React の render() に載せると毎回 Monaco colorizer を引く**ことになり噛み合わない。旧 ArsChat が既に `marked` で描画しているため UX 一致も兼ねて **marked + highlight.js(同期)+ DOMPurify** を採用。依存は arschat-chat に明示追加(marked は workspace 既存、highlight.js/dompurify を追加)。
+
+### 検証結果
+
+- **jest(arschat-chat)**: **10/10 PASS**。内訳: Widget 描画/プロバイダ選択肢(2、既存)、`parseThinkBlocks`(4)、`renderMarkdown`(4: 基本Markdown、**実 highlight.js のコードブロック色付け=`hljs-*` span 生成を確認**、DOMPurify で `<script>` 除去、空入力)。
+- **ビルド**: `npm run prepare`(全5パッケージ tsc エラー0)、`npm run build:electron`(webpack `compiled successfully`)。生成 frontend に arschat-chat モジュール(M3コード含む)を確認。
+- **電メイン回帰 PoC-1**: **全PASS**(tray created / 両 globalShortcut === true / widget window alive → PASS / 全ウィンドウclose後も process alive → PASS)。M3 変更が electron-main 層を壊していないことを確認。
+- **PoC-2**: メニューフィルタ(Editor/Monaco/Terminal filtered out)が毎 run 発火。スクショ capture は下記の環境制約で SKIP。
+- **ライブ Electron 検証(ARSCHAT_M3_AUTOTEST=1)**: **この検証サンドボックスで SKIP**。frontend page start はするが **ワークベンチシェルが描画完了せず**(capturePage が ~6KB のローディングオーバーレイのまま、frontend の `onStart` フェーズが `SkillPromptCoordinator` 以降進まない)、frontend autotest(streaming/永続化/復元)も走らなかった。**M3 固有ではないことを ARSCHAT_M2_AUTOTEST=1 の再runで確認**(M2 も同一症状=6KB のまま、frontend autotest 未到達)。M1/M2 実装時は描画に成功していた(94KB PNG)ので、環境側の描画可用性が現時点で不安定。ILogger 経由で frontend ログを stdout に流す仕込みも入れたが、frontend onStart 未到達のため出力なし。
+- **スクリーンショット**: シェルが描画されないため、**実レンダリングパイプラインから生成**した。jest(jsdom)で実 `renderMarkdown(parseThinkBlocks(モック応答).response)` の HTML を出力 → 実 `index.css` と Widget マークアップに流し込んだ HTML を puppeteer(同梱 Chrome)で撮影。`poc-artifacts/m3-chat-ui.png`(履歴パネル・思考プロセス折り畳み・Markdown 見出し・**実 highlight.js の TS コードハイライト**・箇条書き・入力バー)/ `m3-history-panel.png`(セッション一覧: タイトル+日時、アクティブ強調、新規/削除)。**実 CSS + 実 Markdown 出力**であり、モックではない描画結果。
+
+### ハマった点
+
+1. **`<think>` は Theia の stream パーサでは分離されない**: `AbstractStreamParsingChatAgent` は native `ThinkingResponsePart`(reasoning API)だけを `thinking` パートにする。テキスト内の `<think>` タグはただの markdown。→ 旧 MessageBubble 同様、Widget 側で自前パース(`arschat-think.ts`)。
+2. **highlight.js / dompurify の import(esModuleInterop 無し)**: workspace tsconfig に esModuleInterop が無く(`tsconfig*.json` は無確認変更禁止)、`import x from` が TS1259。CommonJS `require` + `.default ?? mod` で正規化。さらに **module-eval 時に require が例外を投げると frontend DI モジュールごと落ちる**ため、両者を **初回描画時に遅延解決**(`ensureDeps()`)。DOMPurify の CJS は `window` があれば `.sanitize` を持つインスタンス、無ければファクトリなので `typeof sanitize !== 'function'` で `DOMPurify(window)` を明示バインド。
+3. **`ChatRequest` に画像フィールドが無い**: 上の「画像添付」節のとおり variable 経由。最初 `ChatRequest` に画像を直接載せようとして詰まり、`image-context-variable.d.ts` と `chat-agents.js` を読んで variable→ImageMessage 経路を特定した。
+4. **frontend console.log は stdout に出ない**: Electron の renderer console は devtools 行きで、この検証の stdout ログには乗らない(PoC-3 ハマった点4の派生)。M3 autotest は `ILogger.info`(backend へ RPC)併用にしたが、そもそも frontend onStart 未到達で無効化。将来シェル描画が安定したら ILogger 経路で結果が stdout に出る想定。
+5. **履歴パネルの初回 refresh をレイアウト初期化パスから外す**: `getPersistedSessions()` はストレージ初期化(disk I/O)を誘発しうる。View 生成/`initializeLayout` の同期パスで走らせるとシェル復元をブロックしかねないため、`setTimeout(0)` で後追い実行にした(防御的措置)。

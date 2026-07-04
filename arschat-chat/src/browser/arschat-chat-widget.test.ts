@@ -4,6 +4,7 @@ import { ArschatChatWidget } from './arschat-chat-widget';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
 import { ProviderSwitchService } from 'arschat-providers/lib/browser/provider-switch-service';
+import { ArschatChatUiService } from './arschat-chat-ui-service';
 import { render } from '@testing-library/react';
 import { act } from 'react';
 
@@ -25,6 +26,16 @@ describe('ArschatChatWidget', () => {
             } as unknown as ProviderSwitchService);
             bind(ChatService).toConstantValue({} as ChatService);
             bind(ChatAgentService).toConstantValue({} as ChatAgentService);
+            bind(ArschatChatUiService).toConstantValue({
+                onLoadSessionRequested: () => ({ dispose(): void { /* noop */ } }),
+                onNewSessionRequested: () => ({ dispose(): void { /* noop */ } }),
+                onSessionChanged: () => ({ dispose(): void { /* noop */ } }),
+                onSessionsMutated: () => ({ dispose(): void { /* noop */ } }),
+                notifySessionChanged: () => { /* noop */ },
+                notifySessionsMutated: () => { /* noop */ },
+                requestLoadSession: () => { /* noop */ },
+                requestNewSession: () => { /* noop */ }
+            } as unknown as ArschatChatUiService);
             bind(ArschatChatWidget).toSelf();
         });
         const container = new Container();

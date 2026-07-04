@@ -127,3 +127,304 @@
 .arschat-informational-part-body {
     flex: 1 1 auto;
 }
+
+/* ===================== M3: production chat UI ===================== */
+
+/* Widen assistant bubbles so markdown/code has room; keep user bubbles compact. */
+.arschat-chat-message-assistant .arschat-chat-message-bubble {
+    max-width: 85%;
+}
+
+.arschat-new-chat-button {
+    font-size: 12px;
+    flex: 0 0 auto;
+}
+
+.arschat-chat-input {
+    resize: none;
+    min-height: 24px;
+    max-height: 160px;
+    font-family: inherit;
+    line-height: 1.4;
+}
+
+.arschat-chat-abort-button {
+    flex: 0 0 auto;
+    background: var(--theia-errorForeground, #c0392b);
+    color: #fff;
+}
+
+.arschat-user-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* ---- attachments (pending images to send) ---- */
+.arschat-attachments {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 16px 0;
+}
+
+.arschat-attachment {
+    position: relative;
+}
+
+.arschat-attachment-thumb {
+    max-width: 64px;
+    max-height: 64px;
+    border-radius: 6px;
+    border: 1px solid var(--theia-editorGroup-border, #444);
+    display: block;
+}
+
+.arschat-attachment-remove {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 18px;
+    height: 18px;
+    line-height: 16px;
+    border-radius: 50%;
+    border: none;
+    background: var(--theia-errorForeground, #c0392b);
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0;
+}
+
+/* images already attached to a sent user message */
+.arschat-message-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.arschat-message-image {
+    max-width: 180px;
+    max-height: 180px;
+    border-radius: 6px;
+}
+
+/* ---- drag & drop overlay ---- */
+#arschat-chat-root.arschat-drag-active {
+    outline: 2px dashed var(--theia-focusBorder, #007acc);
+    outline-offset: -6px;
+}
+
+/* ---- markdown ---- */
+.arschat-markdown {
+    word-break: break-word;
+}
+
+.arschat-markdown p {
+    margin: 0 0 8px;
+}
+
+.arschat-markdown p:last-child {
+    margin-bottom: 0;
+}
+
+.arschat-markdown h1,
+.arschat-markdown h2,
+.arschat-markdown h3 {
+    margin: 10px 0 6px;
+    line-height: 1.3;
+}
+
+.arschat-markdown ul,
+.arschat-markdown ol {
+    margin: 4px 0 8px;
+    padding-left: 20px;
+}
+
+.arschat-markdown code {
+    font-family: var(--theia-code-font-family, monospace);
+    background: var(--theia-textCodeBlock-background, rgba(255, 255, 255, 0.1));
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+.arschat-code-block {
+    position: relative;
+    margin: 8px 0;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: var(--theia-textCodeBlock-background, #1e1e2e);
+    overflow-x: auto;
+}
+
+.arschat-code-block code {
+    background: none;
+    padding: 0;
+    display: block;
+    white-space: pre;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.arschat-code-lang {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--theia-descriptionForeground);
+    margin-bottom: 6px;
+}
+
+/* ---- <think> block folding ---- */
+.arschat-think-block {
+    margin: 0 0 8px;
+    border-left: 3px solid var(--theia-focusBorder, #6272a4);
+    background: rgba(98, 114, 164, 0.12);
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+.arschat-think-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    color: var(--theia-descriptionForeground);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 2px 0;
+}
+
+.arschat-think-chevron {
+    display: inline-block;
+    transition: transform 0.15s ease;
+    font-size: 9px;
+}
+
+.arschat-think-chevron.open {
+    transform: rotate(90deg);
+}
+
+.arschat-think-content {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--theia-descriptionForeground);
+    white-space: normal;
+}
+
+.arschat-think-spinner {
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--theia-descriptionForeground);
+    border-top-color: transparent;
+    border-radius: 50%;
+    display: inline-block;
+    animation: arschat-spin 0.8s linear infinite;
+}
+
+@keyframes arschat-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ===================== M3: history panel ===================== */
+.arschat-history-widget {
+    background: var(--theia-sideBar-background);
+    color: var(--theia-sideBar-foreground, var(--theia-foreground));
+}
+
+.arschat-history-root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.arschat-history-toolbar {
+    flex: 0 0 auto;
+    padding: 8px;
+    border-bottom: 1px solid var(--theia-editorGroup-border, #444);
+}
+
+.arschat-history-new {
+    width: 100%;
+    font-size: 12px;
+}
+
+.arschat-history-list {
+    flex: 1 1 auto;
+    overflow-y: auto;
+}
+
+.arschat-history-empty {
+    padding: 16px;
+    font-size: 12px;
+    color: var(--theia-descriptionForeground);
+    text-align: center;
+}
+
+.arschat-history-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--theia-editorGroup-border, rgba(255, 255, 255, 0.06));
+}
+
+.arschat-history-item:hover {
+    background: var(--theia-list-hoverBackground, rgba(255, 255, 255, 0.06));
+}
+
+.arschat-history-item.active {
+    background: var(--theia-list-activeSelectionBackground, rgba(0, 122, 204, 0.3));
+    color: var(--theia-list-activeSelectionForeground, inherit);
+}
+
+.arschat-history-item-main {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.arschat-history-item-title {
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.arschat-history-item-date {
+    font-size: 11px;
+    color: var(--theia-descriptionForeground);
+    margin-top: 2px;
+}
+
+.arschat-history-item-delete {
+    flex: 0 0 auto;
+    background: none;
+    border: none;
+    cursor: pointer;
+    opacity: 0;
+    font-size: 13px;
+}
+
+.arschat-history-item:hover .arschat-history-item-delete {
+    opacity: 0.7;
+}
+
+.arschat-history-item-delete:hover {
+    opacity: 1;
+}
+
+/* ===================== highlight.js (compact Dracula-ish, self-contained) ===================== */
+.hljs { color: #f8f8f2; }
+.hljs-comment, .hljs-quote { color: #6272a4; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-link { color: #ff79c6; }
+.hljs-string, .hljs-title, .hljs-name, .hljs-attribute, .hljs-symbol, .hljs-bullet, .hljs-addition { color: #f1fa8c; }
+.hljs-number, .hljs-meta, .hljs-built_in, .hljs-builtin-name, .hljs-params, .hljs-type { color: #bd93f9; }
+.hljs-function .hljs-title, .hljs-title.function_ { color: #50fa7b; }
+.hljs-variable, .hljs-template-variable, .hljs-class .hljs-title, .hljs-title.class_ { color: #8be9fd; }
+.hljs-attr { color: #50fa7b; }
+.hljs-deletion { color: #ff5555; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: bold; }

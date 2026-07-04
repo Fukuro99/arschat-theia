@@ -51,6 +51,8 @@
           "workbench.statusBar.visible": false,
           "workbench.colorTheme": "Dracula Theme",
           "security.workspace.trust.enabled": false,
+          "ai-features.chat.persistedSessionLimit": -1,
+          "ai-features.chat.sessionStorageScope": "global",
           "ai-features.mcp.mcpServers": {
             "everything": {
               "command": "npx",
