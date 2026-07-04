@@ -1,5 +1,7 @@
 // *****************************************************************************
-// ArsChat PoC-1: electron-main customization spike.
+// ArsChat electron-main customization (PoC-1, preserved through M1). Moved here
+// from arschat-core during the M1 package re-org - this is core "app skin"
+// (branding) behavior.
 //
 //   1-1 System tray:      Tray icon + context menu (show/hide, quit). Closing
 //                         all windows must NOT quit the app while the tray
@@ -10,10 +12,14 @@
 //   1-3 Widget window:    A frameless, always-on-top, ~360x480 second
 //                         BrowserWindow loaded from an inline data: URL.
 //
-// Implemented purely as an `ElectronMainApplicationContribution` bound from
-// an electron-main DI module (see arschat-electron-main-module.ts). No Theia
-// source under node_modules is modified; the `ElectronMainApplication`
+// Implemented purely as an `ElectronMainApplicationContribution` bound from an
+// electron-main DI module (see arschat-branding-electron-main-module.ts). No
+// Theia source under node_modules is modified; the `ElectronMainApplication`
 // subclass used here is also bound via DI rebind, not by editing Theia.
+//
+// The [PoC-1] log prefixes are intentionally kept unchanged so the regression
+// autotests (PHASE1_DESIGN.md §9 M1 condition 3) still produce the same
+// recognizable PASS lines.
 // *****************************************************************************
 
 import { injectable, inject } from '@theia/core/shared/inversify';

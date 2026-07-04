@@ -1,21 +1,17 @@
 {
-  "name": "arschat-core",
+  "name": "arschat-branding",
   "keywords": [
     "theia-extension"
   ],
   "version": "0.0.1",
-  "description": "ArsChat Theia PoC core extension",
-  
+  "description": "ArsChat branding: tray / global shortcut / widget window / window icon / quit-suppression (electron-main) plus frontend IDE-dilution and PoC regression autotests",
   "author": "Fukuro99",
-  
   "license": "MIT",
-  
   "files": [
     "lib",
     "src"
   ],
   "dependencies": {
-    "@theia/ai-anthropic": "1.71.2",
     "@theia/ai-chat": "1.71.2",
     "@theia/ai-chat-ui": "1.71.2",
     "@theia/ai-core": "1.71.2",
@@ -26,31 +22,25 @@
     "@theia/monaco": "1.71.2",
     "@theia/plugin-ext": "1.71.2",
     "@theia/terminal": "1.71.2",
-    "@theia/workspace": "1.71.2"
+    "@theia/workspace": "1.71.2",
+    "arschat-chat": "0.0.1"
   },
   "devDependencies": {
     "rimraf": "^5.0.0",
-    "typescript": "~5.4.5",
-    "@testing-library/react": "^14.0.0",
-    "@types/jest": "^29.5.0",
-    "jest": "^29.5.0",
-    "jest-environment-jsdom": "^29.5.0",
-    "ts-node": "^10.9.1",
-    "ts-jest": "^29.1.0"
+    "typescript": "~5.4.5"
   },
   "scripts": {
     "prepare": "npm run clean && npm run build",
     "clean": "rimraf lib",
     "build": "tsc",
-    "watch": "tsc -w",
-    "test": "jest --config configs/jest.config.ts"
+    "watch": "tsc -w"
   },
   "theiaExtensions": [
     {
-      "frontend": "lib/browser/arschat-core-frontend-module"
+      "frontend": "lib/browser/arschat-branding-frontend-module"
     },
     {
-      "electronMain": "lib/electron-main/arschat-electron-main-module"
+      "electronMain": "lib/electron-main/arschat-branding-electron-main-module"
     }
   ]
 }

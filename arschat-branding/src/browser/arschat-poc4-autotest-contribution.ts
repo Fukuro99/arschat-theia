@@ -29,7 +29,7 @@ import { MCPServerManager } from '@theia/ai-mcp/lib/common';
 import { MCP_SERVERS_PREF } from '@theia/ai-mcp/lib/common/mcp-preferences';
 import { ChatResponseContent } from '@theia/ai-chat/lib/common';
 import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
-import { ArschatInformationalPartRenderer } from './arschat-informational-part-renderer';
+import { ArschatInformationalPartRenderer } from 'arschat-chat/lib/browser/arschat-informational-part-renderer';
 
 const AUTOTEST_ENV_VAR = 'ARSCHAT_POC4_AUTOTEST';
 const ANTHROPIC_KEY_ENV_VAR = 'ANTHROPIC_API_KEY';

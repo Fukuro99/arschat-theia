@@ -1,13 +1,15 @@
 // *****************************************************************************
-// ArsChat PoC-1 (1-1): keep the app alive after all BrowserWindows are closed.
+// ArsChat: keep the app alive after all BrowserWindows are closed (PoC-1 1-1)
+// + set the ArsChat window icon (PoC-2 2-3). Moved here from arschat-core
+// during the M1 package re-org - this is core "app skin" (branding) behavior.
 //
 // Theia's stock `ElectronMainApplication#onWindowAllClosed` always calls
 // `requestStop()` (-> `app.quit()`) once every BrowserWindow is closed
 // (see node_modules/@theia/core/lib/electron-main/electron-main-application.js).
-// There is no preference/option to opt out of this from contribution code —
+// There is no preference/option to opt out of this from contribution code -
 // the only extension point is subclassing `ElectronMainApplication` and
 // rebinding it in an electron-main DI module. This file is exactly that
-// subclass; the rebind itself happens in `arschat-electron-main-module.ts`.
+// subclass; the rebind itself happens in `arschat-branding-electron-main-module.ts`.
 //
 // No Theia source under node_modules is modified.
 // *****************************************************************************
@@ -31,7 +33,7 @@ export class ArschatElectronMainApplication extends ElectronMainApplication {
 
     protected override onWindowAllClosed(event: ElectronEvent): void {
         if (this.keepAliveInTray) {
-            console.log('[PoC-1] onWindowAllClosed suppressed (tray-resident mode) - app stays alive');
+            console.log('[arschat-branding] onWindowAllClosed suppressed (tray-resident mode) - app stays alive');
             event.preventDefault();
             return;
         }
@@ -39,13 +41,13 @@ export class ArschatElectronMainApplication extends ElectronMainApplication {
     }
 
     /**
-     * PoC-2 (2-3): placeholder ArsChat window icon, reusing the PoC-1 tray
-     * icon asset (a temporary solid-color PNG). There is no `theia.frontend`
-     * package.json key for the app/window icon (that only exists at the
-     * electron-builder packaging stage, out of scope for this PoC), so the
-     * icon is set here via `BrowserWindowConstructorOptions.icon`, which
-     * Theia's own `getDefaultOptions()` already merges into `windowOptions`
-     * on every window it creates.
+     * PoC-2 (2-3): placeholder ArsChat window icon, reusing the tray icon asset
+     * (a temporary solid-color PNG). There is no `theia.frontend` package.json
+     * key for the app/window icon (that only exists at the electron-builder
+     * packaging stage, out of scope for Phase 1), so the icon is set here via
+     * `BrowserWindowConstructorOptions.icon`, which Theia's own
+     * `getDefaultOptions()` already merges into `windowOptions` on every window
+     * it creates.
      */
     protected override getDefaultOptions(): TheiaBrowserWindowOptions {
         const options = super.getDefaultOptions();

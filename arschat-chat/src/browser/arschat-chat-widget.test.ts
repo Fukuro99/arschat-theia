@@ -1,13 +1,13 @@
 import 'reflect-metadata';
 import { MessageService } from '@theia/core';
 import { ContainerModule, Container } from '@theia/core/shared/inversify';
-import { ArschatCoreWidget } from './arschat-core-widget';
+import { ArschatChatWidget } from './arschat-chat-widget';
 import { render } from '@testing-library/react';
 import { act } from 'react';
 
-describe('ArschatCoreWidget', () => {
+describe('ArschatChatWidget', () => {
 
-    let widget: ArschatCoreWidget;
+    let widget: ArschatChatWidget;
 
     beforeEach(async () => {
         const module = new ContainerModule( bind => {
@@ -16,12 +16,12 @@ describe('ArschatCoreWidget', () => {
                     console.log(message);
                 }
             } as MessageService);
-            bind(ArschatCoreWidget).toSelf();
+            bind(ArschatChatWidget).toSelf();
         });
         const container = new Container();
         container.load(module);
         await act(async () => {
-            widget = container.resolve<ArschatCoreWidget>(ArschatCoreWidget);
+            widget = container.resolve<ArschatChatWidget>(ArschatChatWidget);
         });
     });
 

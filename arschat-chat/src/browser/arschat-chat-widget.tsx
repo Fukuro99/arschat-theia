@@ -1,12 +1,17 @@
 // *****************************************************************************
-// ArsChat PoC-2: chat-first main-area widget.
+// ArsChat chat widget: chat-first main-area ReactWidget.
 //
-// This repurposes the generator-scaffolded `ArschatCoreWidget` (originally a
-// left-panel "sample widget with a button") into a dummy chat UI that occupies
-// the main area. It is intentionally static (no real chat backend) - the goal
-// of PoC-2 is only to prove that a ReactWidget can be made to look like a
-// chat app's primary surface and can take over the main area on startup, not
-// to build the real chat feature.
+// Moved here from arschat-core (PoC-2's `ArschatCoreWidget`) during the M1
+// package re-org. Still the PoC's static dummy chat UI - the real chat
+// backend (streaming, sessions, history) lands in M3 (PHASE1_DESIGN.md §5).
+// The goal at this stage is unchanged: prove a ReactWidget can be the app's
+// primary surface and take over the main area on startup.
+//
+// Renamed ArschatCoreWidget -> ArschatChatWidget and the widget id
+// 'arschat-core:widget' -> 'arschat-chat:widget' so the DI class name, the
+// widget id string and the owning package are all consistent (a stale
+// 'arschat-core:widget' id in a persisted layout would otherwise break
+// startup layout restoration - see BUILD_NOTES.md M1 notes).
 // *****************************************************************************
 
 import * as React from 'react';
@@ -22,15 +27,15 @@ interface DummyMessage {
 }
 
 const DUMMY_MESSAGES: DummyMessage[] = [
-    { id: 1, author: 'assistant', text: 'こんにちは。ArsChat PoC-2 のダミーチャット画面です。' },
+    { id: 1, author: 'assistant', text: 'こんにちは。ArsChat のチャット画面です（M1 時点ではダミー UI）。' },
     { id: 2, author: 'user', text: 'このウィジェットはメインエリアを占有していますか？' },
     { id: 3, author: 'assistant', text: 'はい。起動直後からエディタや Getting Started の代わりにこの画面が表示されています。' },
 ];
 
 @injectable()
-export class ArschatCoreWidget extends ReactWidget {
+export class ArschatChatWidget extends ReactWidget {
 
-    static readonly ID = 'arschat-core:widget';
+    static readonly ID = 'arschat-chat:widget';
     static readonly LABEL = 'ArsChat';
 
     @inject(MessageService)
@@ -42,9 +47,9 @@ export class ArschatCoreWidget extends ReactWidget {
     }
 
     protected async doInit(): Promise<void> {
-        this.id = ArschatCoreWidget.ID;
-        this.title.label = ArschatCoreWidget.LABEL;
-        this.title.caption = ArschatCoreWidget.LABEL;
+        this.id = ArschatChatWidget.ID;
+        this.title.label = ArschatChatWidget.LABEL;
+        this.title.caption = ArschatChatWidget.LABEL;
         this.title.closable = false;
         this.title.iconClass = 'fa fa-comments';
         this.addClass('arschat-chat-widget');
@@ -69,13 +74,13 @@ export class ArschatCoreWidget extends ReactWidget {
                         id='arschat-chat-input'
                         className='theia-input arschat-chat-input'
                         type='text'
-                        placeholder='メッセージを入力...(PoC ダミー、送信はできません)'
+                        placeholder='メッセージを入力...(M1 ダミー、送信はできません)'
                         readOnly
                     />
                     <button
                         id='arschat-chat-send-button'
                         className='theia-button arschat-chat-send-button'
-                        title='Send (PoC dummy)'
+                        title='Send (dummy)'
                         onClick={() => this.displayMessage()}
                     >
                         送信
@@ -86,7 +91,7 @@ export class ArschatCoreWidget extends ReactWidget {
     }
 
     protected displayMessage(): void {
-        this.messageService.info('PoC-2: これはダミーの送信ボタンです（実際の送信機能はありません）');
+        this.messageService.info('M1: これはダミーの送信ボタンです（実際の送信機能は M3 で実装）');
     }
 
     protected onActivateRequest(msg: Message): void {

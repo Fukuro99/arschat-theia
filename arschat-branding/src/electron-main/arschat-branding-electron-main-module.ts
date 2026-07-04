@@ -1,18 +1,19 @@
 // *****************************************************************************
-// ArsChat PoC-1: electron-main DI module.
+// ArsChat branding - electron-main DI module.
 //
-// This is the entry point registered via `theiaExtensions[].electronMain` in
-// arschat-core/package.json. It is loaded by Theia's electron-main bootstrap
+// Entry point registered via `theiaExtensions[].electronMain` in
+// arschat-branding/package.json. Loaded by Theia's electron-main bootstrap
 // alongside `electron-main-application-module` (Theia core, unmodified).
+// Moved here from arschat-core during the M1 package re-org.
 //
 // Two DI operations, both allowed by Theia's own extension contract:
 //   - rebind(ElectronMainApplication) to our subclass, so we can override
-//     `onWindowAllClosed` (see arschat-electron-main-application.ts). This is
-//     the officially documented pattern (see the class doc comment in
-//     node_modules/@theia/core/lib/electron-main/electron-main-application.d.ts:
-//     "you can extend and rebind the `ElectronMainApplication` class").
+//     `onWindowAllClosed` / `getDefaultOptions` (officially documented pattern,
+//     see the class doc comment in
+//     node_modules/@theia/core/lib/electron-main/electron-main-application.d.ts).
 //   - bind(ElectronMainApplicationContribution) to our tray/shortcut/widget
-//     contribution, using the standard multi-bound contribution point.
+//     contribution + the flag-gated PoC regression autotests, via the standard
+//     multi-bound contribution point.
 // *****************************************************************************
 
 import { ContainerModule } from '@theia/core/shared/inversify';

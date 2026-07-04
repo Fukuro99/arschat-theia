@@ -1,0 +1,39 @@
+// *****************************************************************************
+// ArsChat branding - frontend DI module ("the app skin", frontend layer).
+//
+// Moved here from arschat-core during the M1 package re-org. Registers:
+//   - the IDE-dilution FilterContribution (removes Selection/Go/Terminal menus)
+//   - the flag-gated PoC-3 and PoC-4 frontend regression autotests
+//
+// The chat view itself (widget, view contribution, custom response renderer)
+// now lives in arschat-chat. This module carries only shell-level branding /
+// IDE-dilution + the regression autotests, per PHASE1_DESIGN.md §2 (which lets
+// the frontend "IDE dilution" and layout enforcement be treated as part of the
+// app skin). Layout enforcement is kept with the chat view in arschat-chat
+// because it is intrinsic to that view; only IDE dilution lives here.
+// *****************************************************************************
+
+import { ContainerModule } from '@theia/core/shared/inversify';
+import { FilterContribution } from '@theia/core';
+import { FrontendApplicationContribution } from '@theia/core/lib/browser';
+import { ArschatMenuFilterContribution } from './arschat-ide-dilution';
+import { ArschatPoc3AutotestContribution } from './arschat-poc3-autotest-contribution';
+import { ArschatPoc4AutotestContribution } from './arschat-poc4-autotest-contribution';
+
+export default new ContainerModule(bind => {
+    // IDE-dilution: menu filtering (Selection/Go/Terminal). Status bar
+    // visibility is handled declaratively via electron-app/package.json
+    // `theia.frontend.config.preferences`, not here.
+    bind(ArschatMenuFilterContribution).toSelf().inSingletonScope();
+    bind(FilterContribution).toService(ArschatMenuFilterContribution);
+
+    // PoC-3: flag-gated autotest (opens the vsx-registry Extensions view,
+    // logs deployed plugins, dumps ESLint problem markers).
+    bind(ArschatPoc3AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatPoc3AutotestContribution);
+
+    // PoC-4: flag-gated autotest (checks Anthropic provider wiring + MCP server
+    // start/tool listing + custom renderer registration, opens the AI chat view).
+    bind(ArschatPoc4AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatPoc4AutotestContribution);
+});

@@ -334,3 +334,67 @@ if (common_1.InformationalChatResponseContent.is(response)) {
 - `ReasoningApi`/`EFFORT_REASONING`/`XHIGH_EFFORT`等、Anthropic側のモデル対応表(`DEFAULT_MODEL_MAX_TOKENS`等)が「Claude 4.6+」のような将来モデル名を正規表現で先取りする形でハードコードされている。Theia AI側がAnthropic SDKの世代交代に追従する形でこの種の定数を更新し続ける必要があり、実際のモデルリリースとTheia AI側のリリースサイクルがずれると「新モデルは動くがreasoning UIが出ない」等のギャップが生じ得る。
 - MCPの`ai-features.mcp.mcpServers`はJSON形式のfree-form preferenceであり、専用のGUI設定画面は無い(1.71.2時点)。サーバー追加は生JSON編集が前提になっており、VS Code等と比べるとMCP管理体験はまだ最小限。
 - `@theia/ai-ide`という「Theia AIのデフォルト無効化+preferenceベースの明示的有効化」を担うパッケージが別途存在すること自体、1.71時点でTheia AI機能群のパッケージ境界がまだ細かく分割されている途中(adopter側がどこまで機能を持ち込むかの裁量が大きい)ことを示している。今回のPoCのように`ai-ide`を経由せず`ai-core`+個別プロバイダ+`ai-chat-ui`だけを直接組み合わせる構成は、Theia公式のフルIDE構成(Theia IDEディストリビューション)とは異なる非標準ルートであり、将来のマイナーバージョンで`ai-core`のデフォルト値自体が変わる可能性は否定できない(現に「デフォルト有効」という前提の食い違いが実際に発生した)。
+
+## Phase 1 M1 実装メモ (パッケージ再編)
+
+作成: 2026-07-04 / 対象: PHASE1_DESIGN.md §2・§9 M1。肥大化した単一パッケージ `arschat-core` を解体し、後続Phaseで差し替え・拡張する単位でドメイン別Theia拡張5個に再編した。**Theia本体(node_modules配下)は一切改変していない。全パッケージ 1.71.2 ピン留め維持。**
+
+### 再編後のパッケージ構成
+
+```
+arschat-theia/
+├── electron-app/          アプリ本体(依存を新5パッケージに更新)
+├── browser-app/           生成物の残置(このワークフローではビルド/起動しない)。arschat-core参照を解消
+├── arschat-branding/      「アプリの皮」: electron-main(トレイ/ホットキー/ウィジェットwindow/
+│                          ウィンドウアイコン/quit抑止)+ frontendのIDE希釈(メニューフィルタ)
+│                          + PoC回帰autotest(1/2/3/4)を集約
+├── arschat-providers/     空スケルトン(M2で実装)
+├── arschat-chat/          チャットWidget(ArschatChatWidget)+ViewContribution+
+│                          カスタムChatResponsePartRenderer
+├── arschat-agents/        空スケルトン(M4で実装)
+└── arschat-tools/         空スケルトン(M5で実装)
+```
+
+### 移動対応表(旧 arschat-core → 新)
+
+| 旧(arschat-core) | 新パッケージ / ファイル | 改名 |
+|---|---|---|
+| `browser/arschat-core-widget.tsx` (`ArschatCoreWidget`) | `arschat-chat/browser/arschat-chat-widget.tsx` (`ArschatChatWidget`) | クラス名+widget id `arschat-core:widget`→`arschat-chat:widget` |
+| `browser/arschat-core-contribution.ts` (`ArschatCoreContribution`) | `arschat-chat/browser/arschat-chat-contribution.ts` (`ArschatChatContribution`) | クラス名+command id `arschat-core:command`→`arschat-chat:command` |
+| `browser/arschat-informational-part-renderer.tsx` | `arschat-chat/browser/arschat-informational-part-renderer.tsx` | 同名(チャット応答描画なのでchatに所属) |
+| `browser/style/index.css` | `arschat-chat/browser/style/index.css` | 同一 |
+| `browser/arschat-core-widget.test.ts` + `configs/jest*` | `arschat-chat/browser/arschat-chat-widget.test.ts` + `configs/` | 参照クラス名のみ更新 |
+| `browser/arschat-core-frontend-module.ts` | 分割 → `arschat-chat-frontend-module.ts`(chat) + `arschat-branding-frontend-module.ts`(branding) | — |
+| `browser/arschat-ide-dilution.ts` (`ArschatMenuFilterContribution`) | `arschat-branding/browser/arschat-ide-dilution.ts` | 同一 |
+| `browser/arschat-poc3/poc4-autotest-contribution.ts` | `arschat-branding/browser/…` | poc4はinformational renderer importを `arschat-chat/lib/...` に変更 |
+| `electron-main/arschat-electron-main-application.ts` | `arschat-branding/electron-main/…` | 同名 |
+| `electron-main/arschat-tray-contribution.ts` + `arschat-tray-icon.ts` | `arschat-branding/electron-main/…` | 同一(`[PoC-1]`ログ接頭辞は回帰検証のため維持) |
+| `electron-main/arschat-poc1/2/3/4-autotest-contribution.ts` | `arschat-branding/electron-main/…` | 同一(REPO_ROOT算出 `../../..` はbranding直下でもリポルート一致) |
+| `electron-main/arschat-electron-main-module.ts` | `arschat-branding/electron-main/arschat-branding-electron-main-module.ts` | module名 |
+
+### 判断根拠(PHASE1_DESIGN.md §2 が委ねた点)
+
+1. **レイアウト強制(initializeLayout/onStart)はarschat-brandingではなくarschat-chatに置いた。** §2はfrontendのIDE希釈とレイアウト強制を「アプリの皮」としてbrandingに含めてもよいとしたが、レイアウト強制は「*この*チャットビューを開いてアクティブにする」処理で、対象ウィジェットと不可分。brandingがchatのwidget id/クラスを逆参照する循環気味の依存を避け、ViewContributionはwidgetと同じarschat-chatに同居させた。brandingにはトレイ/ウィンドウ/メニューフィルタという真にシェルレベルの関心だけを残した。
+2. **PoC autotest群は全てarschat-brandingに集約した。** §2は「各機能の所属パッケージ、またはbrandingにまとめる — 判断して記録」とした。autotestは複数ドメインを横断し(poc1=トレイ, poc2=レイアウト/ブランディング, poc3=拡張, poc4=AI/MCP)、electron-main側の共通処理がスクリーンショット取得というシェルレベルの操作。回帰検証の入口を1パッケージに集約する方が保守しやすいと判断。poc4のfrontend autotestが検証対象とする `ArschatInformationalPartRenderer` はarschat-chat所属なので、brandingはarschat-chatをworkspace依存する(cross-package DIが正しく機能することは実機のPoC-4 4-3 PASSで確認済み)。
+3. **informational-part-rendererはchatに置いた**(brandingではなく)。チャット応答の描画コンポーネントであり、M3の本チャット実装と同じ関心のため。
+4. **version は 0.0.0 ではなく 0.0.1 を採用。** 依頼文は「version 0.0.0」と「arschat-coreと同じ規約」の両方を記したが、実際のarschat-coreは0.0.1であり、electron-app/browser-appのworkspace参照も `"arschat-*": "0.0.1"` 形式。既存規約(=arschat-coreの実値)とworkspace解決の一貫性を優先し全パッケージ0.0.1で統一した。
+5. **browser-app** は生成物の残置(BUILD_NOTES足場節参照、このワークフローではelectronのみビルド/起動)。dangling になる `arschat-core` 参照を解消するため新パッケージ(chat+3スケルトン)に張り替え、frontendが要求する `@theia/ai-*`/`plugin-ext` 依存も追加してworkspace解決の一貫性を保った。electron専用の `arschat-branding`(electronMainモジュールを持つ)はbrowser-appには含めていない。
+
+### widget id 改名とレイアウトキャッシュ
+
+`arschat-core:widget`→`arschat-chat:widget` へ改名したため、旧セッションで永続化された `%APPDATA%/electron-app/` のシェルレイアウトには古いidが残る。これは**自己修復**する: Theiaは未知widget id(=対応するWidgetFactoryが無い)を復元時に単に破棄し、`ArschatChatContribution#onStart` が毎起動で新idのウィジェットを強制open+activateする。実機ログで `[arschat-chat] onStart: chat widget activated (id=arschat-chat:widget)` を確認、旧idに起因するエラーや空メインエリアは発生しなかった。
+
+### ビルド・検証結果(PHASE1_DESIGN.md §9 M1 完了条件)
+
+1. **`yarn` 全パッケージビルド**: PASS。`arschat-*/lib` を全削除してから `yarn install` → lerna `prepare` が5パッケージを正しいトポロジ順(chat→branding)で `tsc` ビルド、TSエラー0。`npm run build:electron`(rebuild:electron + theia build)も webpack `compiled successfully`。生成された src-gen に5 frontendモジュール + brandingのelectronMainモジュールが登録され、`arschat-core` 参照は0。
+2. **Electron起動でエラーなし**: PASS。全autotest実行で `started_contributions` 到達、frontend contributions ロード完了、コード起因のエラー/例外なし(末尾のGPU/Network serviceは検証プロセスの強制終了由来で従来同様無関係)。
+3. **`ARSCHAT_POC1_AUTOTEST=1`**: PASS。`tray created successfully` / `globalShortcut.register(...) === true`(Space・W両方) / widget window `alive === true -> PASS` / 全ウィンドウclose後も `process still alive -> PASS`(トレイ常駐)。
+4. **`ARSCHAT_POC2_AUTOTEST=1`**: PASS。メニューフィルタ発火(Editor/Monaco/Terminal)、`[arschat-chat] onStart: chat widget activated (id=arschat-chat:widget)`、スクリーンショット取得成功→`poc-artifacts/m1-regression.png` として保存。目視でチャットUIがメインエリア占有・ウィンドウタイトル/タブ「ArsChat」ブランディング維持を確認(初回runは `capturePage` が display surface未準備で失敗、再runで成功 — 従来からのGUIレス環境の既知の揺らぎ。コード起因ではない)。
+5. **VSIXデプロイログ**: PASS。`--plugins=local-dir:plugins` が従来通り honored、4 VSIXの `Only user plugins will be handled ... unpack the plugin 'xxx.vsix' manually` 警告(=展開済みディレクトリ側が実デプロイされる従来仕様)、`Deploy plugins list: 35.2 ms` / `PLUGIN_HOST(...) starting instance` を確認。plugins配置と--plugins指定は再編で壊れていない。
+6. **参考: PoC-4**(4-1/4-2/4-3) も全PASS。特に 4-3 で arschat-chat 所属の `ArschatInformationalPartRenderer` が ChatResponsePartRenderer contribution provider に登録済み(cross-package DI 正常)を実機確認。
+
+### ハマった点
+
+- **lerna依存順**: branding は arschat-chat の `lib`(informational renderer)を import する。`yarn install`→`lerna run prepare` は package.json の依存関係からトポロジ順を解決するため、branding に `"arschat-chat": "0.0.1"` を宣言しておけば chat が先にビルドされる。宣言し忘れると branding の tsc が `arschat-chat/lib/...` を解決できず失敗する(宣言済みで問題なし)。
+- **poc4 autotest の renderer import パス**: 旧 `./arschat-informational-part-renderer`(同一パッケージ相対)を、renderer移動先の `arschat-chat/lib/browser/arschat-informational-part-renderer`(workspace越えのビルド出力参照)に変更する必要があった。TS的にはソース(`src`)ではなく `lib`(=package `files`/`main`解決)を指す点に注意。
+- **electron-main autotest の REPO_ROOT**: `path.resolve(__dirname, '..','..','..')` は `arschat-branding/lib/electron-main/` から3つ上=リポルート。arschat-core も arschat-branding もリポ直下の同階層なので算出結果は不変、修正不要だった(確認済み)。

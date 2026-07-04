@@ -1,27 +1,23 @@
 // *****************************************************************************
-// ArsChat PoC-4 (4-3): custom chat response part renderer.
+// ArsChat custom chat response part renderer (PoC-4 4-3, preserved through M1).
 //
-// Demonstrates plugging a bespoke React component into Theia AI's chat
-// response rendering extension point (`ChatResponsePartRenderer`, see
-// node_modules/@theia/ai-chat-ui/lib/browser/chat-response-part-renderer.d.ts).
-// This is a plain multi-bound contribution point
-// (`bindRootContributionProvider(bind, ChatResponsePartRenderer)` in
-// ai-chat-ui-frontend-module.js) - no Theia core changes required.
+// Moved here from arschat-core during the M1 package re-org. It belongs with
+// the chat package because it is chat-response rendering. Kept as-is (still a
+// regression asset) - the real custom rendering work is M3 (PHASE1_DESIGN.md
+// §5). This proves a bespoke React component can plug into Theia AI's chat
+// response rendering extension point (`ChatResponsePartRenderer`) with no
+// Theia core changes.
 //
 // Target content type: `InformationalChatResponseContent` (kind:
-// 'informational'). Chosen deliberately because Theia AI's own built-in
-// `MarkdownPartRenderer` already claims this kind (canHandle() returns 10)
-// but its `render()` intentionally returns `null` for it - see the
-// "TODO let the user configure whether they want to see informational
-// content" comment in
-// node_modules/@theia/ai-chat-ui/lib/browser/chat-response-renderer/markdown-part-renderer.js.
-// In other words: informational content is silently swallowed by default.
-// By registering `ArschatInformationalPartRenderer` with a strictly higher
-// `canHandle()` score (11 > 10), it wins the "highest score" selection Theia
-// AI uses to pick a renderer per content part, and an ArsChat-branded React
-// component actually paints the content that upstream drops on the floor.
-// This is proof, not decoration: without this contribution the informational
-// part renders as nothing at all.
+// 'informational'). Theia AI's own `MarkdownPartRenderer` claims this kind
+// (canHandle() returns 10) but its `render()` intentionally returns `null`
+// for it (see the "TODO let the user configure whether they want to see
+// informational content" comment in
+// node_modules/@theia/ai-chat-ui/lib/browser/chat-response-renderer/markdown-part-renderer.js).
+// So informational content is silently swallowed by default. Registering this
+// renderer with a strictly higher canHandle() score (11 > 10) wins the
+// "highest score" selection, and an ArsChat-branded component actually paints
+// what upstream drops on the floor.
 // *****************************************************************************
 
 import { injectable, inject } from '@theia/core/shared/inversify';

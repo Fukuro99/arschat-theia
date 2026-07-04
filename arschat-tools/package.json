@@ -1,0 +1,32 @@
+{
+  "name": "arschat-tools",
+  "keywords": [
+    "theia-extension"
+  ],
+  "version": "0.0.1",
+  "description": "ArsChat AI tools (run_command / web_search / fetch_page / file ops) + approval flow (skeleton; implemented in M5)",
+  "author": "Fukuro99",
+  "license": "MIT",
+  "files": [
+    "lib",
+    "src"
+  ],
+  "dependencies": {
+    "@theia/core": "1.71.2"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.0",
+    "typescript": "~5.4.5"
+  },
+  "scripts": {
+    "prepare": "npm run clean && npm run build",
+    "clean": "rimraf lib",
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
+  "theiaExtensions": [
+    {
+      "frontend": "lib/browser/arschat-tools-frontend-module"
+    }
+  ]
+}

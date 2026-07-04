@@ -1,0 +1,32 @@
+{
+  "name": "arschat-providers",
+  "keywords": [
+    "theia-extension"
+  ],
+  "version": "0.0.1",
+  "description": "ArsChat LLM provider registration / switching (skeleton; implemented in M2)",
+  "author": "Fukuro99",
+  "license": "MIT",
+  "files": [
+    "lib",
+    "src"
+  ],
+  "dependencies": {
+    "@theia/core": "1.71.2"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.0",
+    "typescript": "~5.4.5"
+  },
+  "scripts": {
+    "prepare": "npm run clean && npm run build",
+    "clean": "rimraf lib",
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
+  "theiaExtensions": [
+    {
+      "frontend": "lib/browser/arschat-providers-frontend-module"
+    }
+  ]
+}
