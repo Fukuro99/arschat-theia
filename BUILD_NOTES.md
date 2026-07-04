@@ -183,3 +183,43 @@ onWindowAllClosed(event) {
 [PoC-2][autotest] screenshot saved -> C:\Users\takep\source\arschat-theia\poc-artifacts\poc2-main-window.png -> PASS
 ```
 2回目以降の起動(同一プロファイル、ただし前回セッションは `timeout` コマンドによる強制終了で正常終了していない)でも同じログが再現し、`initializeLayout` も含めて毎回発火した(レイアウトが正しく永続化されていなかったため)。いずれの実行でもスクリーンショット上でメインエリアのチャットUI・4項目のみのメニューバー・ステータスバー非表示・ウィンドウタイトル「ArsChat - ArsChat」を確認した。エラー・例外は出力されなかった(スクリプトを`timeout`で強制終了した際に出る `Network service crashed` / `GPU process exited unexpectedly` は検証プロセスの強制終了に起因するものでPoC-2のコードとは無関係)。
+
+## PoC-3 実装メモ (VS Code拡張の実動作検証)
+
+### 追加した依存関係 (electron-app/package.json、すべて1.71.2)
+
+- `@theia/plugin-ext` — VS Code拡張ホスト基盤(plugin host プロセス、API実装)
+- `@theia/plugin-ext-vscode` — VS Code互換レイヤー(vscodeスキームのプラグイン解決、`plugin-vscode-init`)
+- `@theia/vsx-registry` — Open VSX 連携+拡張ビュー(Extensions)UI
+
+この3つを追加すると推移的に約20の@theiaパッケージが入る(`ai-core`/`ai-mcp`/`scm`/`debug`/`task`/`test`/`console`/`notebook`/`timeline`/`bulk-edit`/`callhierarchy`/`typehierarchy`/`editor-preview`/`search-in-workspace`/`output`/`file-search`/`outline-view`/`userstorage`/`variable-resolver`/`terminal-manager` 等)。すべて1.71.2でピン留めされていることを確認済み(バージョン衝突なし)。**副作用として、PoC-2で「依存に入れないことで構造的に消していた」Run メニューや ActivityBar 項目(検索/SCM/デバッグ/テスト)が復活する。** Phase 1 で `FilterContribution` の対象を拡大して再希釈が必要。
+
+`arschat-core/package.json` にも autotest 用に `@theia/plugin-ext` / `@theia/markers` / `@theia/workspace` を追加(いずれもワークスペース解決済みでyarn.lockへの新規追加なし)。
+
+### プラグインの配置方法(実行時ロード)
+
+- **`theiaPluginsDir`(package.json トップレベル)は実行時に読まれない。** これは `theia download:plugins` (ビルド時ヘルパー)専用の設定。
+- 実行時のプラグイン探索は `THEIA_DEFAULT_PLUGINS=local-dir:<絶対パス>` 環境変数、または `theia start --plugins=local-dir:plugins` CLI引数(相対パスはcwd基準)。`electron-app/package.json` の `start` スクリプトに `--plugins=local-dir:plugins` を組み込んだので、通常の `npm run start:electron` で `electron-app/plugins/` が読まれる。
+- **`local-dir` に `.vsix` をそのまま置いてもロードされない**: `Only user plugins will be handled by file handlers, please unpack the plugin 'xxx.vsix' manually.` 警告が出てスキップされる。VSIXのzipを `plugins/<publisher>.<name>/` に展開(展開ルートに `extension.vsixmanifest` と `extension/` が来る形)すれば読まれる。これは `theia download:plugins` が生成するレイアウトと同じ。
+- VSIX入手は Open VSX REST API: `https://open-vsx.org/api/{namespace}/{name}/latest` のJSONの `files.download` がVSIX直リンク。
+
+### ハマった点
+
+1. **`@vscode/windows-ca-certs` のネイティブビルド失敗でwebpackが停止(最重要)**: `@theia/plugin-ext` → `@vscode/proxy-agent` → `@vscode/windows-ca-certs`(optionalDependency)という依存で、この native addon のビルドが MSVC の「Spectre 軽減ライブラリ」(VSインストーラーの個別コンポーネント)未導入だと `MSB8040` で失敗する。optional なので `yarn install` は成功するが、**モジュールが node_modules に存在しない状態**になり、`theia build` の webpack (node ターゲット) が `Can't resolve '@vscode/windows-ca-certs'` でエラー停止する。Theia生成の `gen-webpack.node.config.js` は `process.platform !== 'win32'` のときだけこのモジュールを IgnorePlugin に入れる実装のため、**Windowsでビルドしているのにモジュールが無い**というこのケースが素通りする。**解決策(Theia本体無改変)**: 自前の `electron-app/webpack.config.js` で `nodeConfig.ignoredResources.add('@vscode/windows-ca-certs')` を無条件追加。実行時は `@vscode/proxy-agent` の `getCaCertificates` が `.catch()` でログして `undefined` にフォールバックするため安全(企業プロキシのTLS傍受環境でWindows証明書ストアを読む機能のみ失われる)。なお `webpack.config.js` は従来 `.gitignore` の `*-app/*` に巻き込まれて未追跡だったため、`!*-app/webpack.config.js` の例外を追加してコミット対象にした(このignore修正が無いとクローン直後のビルドが再現しない)。
+2. **ワークスペーストラストダイアログがプラグインactivateをブロック**: 初回起動時に「Do you trust the authors of the files in this folder?」モーダルが出て、応答するまで全プラグインのactivate(テーマ適用含む)が保留される。GUIレス環境では操作できないため、`theia.frontend.config.preferences` に `"security.workspace.trust.enabled": false` を追加して無効化した(preferenceデフォルト上書きのゼロコード機構、PoC-2と同じ)。
+3. **素のTheiaには言語定義(language contribution)が無い**: `.js` を開いても languageId が `plaintext` になり、ESLint拡張のlanguage probeが発火せず**エラーも出ずに沈黙する**。monaco-editor-core は言語定義を持たず、`.js`→`javascript` の関連付け・TextMateグラマーはVS Codeビルトイン拡張(`vscode.javascript`)が供給するため。Open VSX の `vscode/javascript`(1.95.3)を plugins/ に追加して解決。原因特定には autotest にlanguageIdのログ出力を足して確認した。**実移行ではビルトイン拡張パック(eclipse-theia.builtin-extension-pack 等)の同梱が必須。**
+4. **フロントエンド(レンダラー)から `process.env` が見えない**: frontend コントリビューションで `process.env.ARSCHAT_POC3_AUTOTEST` を見るゲートは silent に無効化される(webpackのshimで空)。Theia標準の `EnvVariablesServer`(`@theia/core/lib/common/env-variables`)のRPC経由でバックエンドの環境変数を取得する方式に変更して解決。electron-main 側コントリビューションでは従来どおり `process.env` が直接使える。
+5. **ESLint拡張はワークスペースローカルの `eslint` ライブラリが必要**: vscode-eslint はワークスペースの `node_modules/eslint` を解決して使う(見つからないと lint しない)。検証ワークスペースに `eslint@8.57.1` を `npm install` して解決(eslint 8系は `.eslintrc.json` をそのまま読む)。
+6. **`npx theia start` は使えない**: パス解決が壊れて `node_modules\node_modules\@theia\cli\bin\theia.js` を探しに行き失敗する。`node ../node_modules/@theia/cli/bin/theia start ...` の直接呼び出し、またはnpmスクリプト経由(`npm run start:electron`)を使う。
+7. **検証run同士の干渉**: バックグラウンドで起動した検証runの後始末 `taskkill //F //IM electron.exe` が、後続runのelectronを誤って殺す事故が起きた(イメージ名指定のため全electronプロセスが対象)。runを直列化して解決。同種の検証をする際は注意。
+
+### 検証コード(autotest、いずれも `ARSCHAT_POC3_AUTOTEST=1` 時のみ動作)
+
+- `arschat-core/src/browser/arschat-poc3-autotest-contribution.ts`(frontend): t+10s に `HostedPluginSupport.plugins` のデプロイ済みプラグイン一覧をログ出力+ワークスペースの `sample.js` をエディタで開いてlanguageIdをログ、t+18s に `vsxExtensions.toggle` で拡張ビューを開く、t+26s に `ProblemManager.findMarkers()` の全マーカー(owner/uri/message)をダンプしESLint由来マーカーの有無を判定。
+- `arschat-core/src/electron-main/arschat-poc3-autotest-contribution.ts`(electron-main): PoC-2と同じ `webContents.capturePage()` 方式で t+22s に `poc3-main-window.png`、t+30s に `poc3-extensions-view.png` を保存。
+
+### ビルドサイズ・起動時間への影響
+
+- ビルド成果物: `electron-app/lib` 全体で約235MB(frontend 176MB / backend 57MB、development modeビルド)。プラグイン4種(VSIX+展開後)は約25MB。node_modules の @theia パッケージ数は 25→45。
+- 起動時間: warm profile で「All frontend contributions settled: ~1.7〜3.5s / backend起動から ready まで ~3.2〜6.7s」。PoC-2時点と同オーダーで、plugin host の起動は非同期のため体感の起動時間への影響は軽微。プラグインのデプロイ自体は ~30ms、4プラグインのsync ~30ms。
+- plugin host は別プロセス(`PLUGIN_HOST(pid) starting instance`)として起動し、GitLensのような重量級拡張のロードもフロントエンドをブロックしない。

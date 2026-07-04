@@ -12,9 +12,12 @@
     "@theia/messages": "1.71.2",
     "@theia/monaco": "1.71.2",
     "@theia/navigator": "1.71.2",
+    "@theia/plugin-ext": "1.71.2",
+    "@theia/plugin-ext-vscode": "1.71.2",
     "@theia/preferences": "1.71.2",
     "@theia/process": "1.71.2",
     "@theia/terminal": "1.71.2",
+    "@theia/vsx-registry": "1.71.2",
     "@theia/workspace": "1.71.2",
     "arschat-core": "0.0.1"
   },
@@ -26,7 +29,7 @@
   "scripts": {
     "bundle": "npm run rebuild && theia build --mode development",
     "rebuild": "theia rebuild:electron --cacheRoot ..",
-    "start": "theia start",
+    "start": "theia start --plugins=local-dir:plugins",
     "watch": "npm run rebuild && theia build --watch --mode development"
   },
   "theia": {
@@ -35,9 +38,12 @@
       "config": {
         "applicationName": "ArsChat",
         "preferences": {
-          "workbench.statusBar.visible": false
+          "workbench.statusBar.visible": false,
+          "workbench.colorTheme": "Dracula Theme",
+          "security.workspace.trust.enabled": false
         }
       }
     }
-  }
+  },
+  "theiaPluginsDir": "plugins"
 }

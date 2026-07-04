@@ -2,6 +2,7 @@ import { ContainerModule } from '@theia/core/shared/inversify';
 import { ArschatCoreWidget } from './arschat-core-widget';
 import { ArschatCoreContribution } from './arschat-core-contribution';
 import { ArschatMenuFilterContribution } from './arschat-ide-dilution';
+import { ArschatPoc3AutotestContribution } from './arschat-poc3-autotest-contribution';
 import { bindViewContribution, FrontendApplicationContribution, WidgetFactory } from '@theia/core/lib/browser';
 import { FilterContribution } from '@theia/core';
 
@@ -21,4 +22,9 @@ export default new ContainerModule(bind => {
     // electron-app/package.json `theia.frontend.config.preferences`, not here.
     bind(ArschatMenuFilterContribution).toSelf().inSingletonScope();
     bind(FilterContribution).toService(ArschatMenuFilterContribution);
+
+    // PoC-3: flag-gated autotest helper (opens the vsx-registry Extensions
+    // view programmatically in the GUI-less verification environment).
+    bind(ArschatPoc3AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatPoc3AutotestContribution);
 });

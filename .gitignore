@@ -5,6 +5,8 @@ dist
 *.log
 *-app/*
 !*-app/package.json
+!*-app/webpack.config.js
+*-app/plugins/*.vsix
 .yarn-integrity
 *.tsbuildinfo
 poc-artifacts/

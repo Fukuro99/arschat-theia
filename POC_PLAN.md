@@ -87,10 +87,54 @@ ArsChat 要件との最大の摩擦点。公式ドキュメントに記載がな
 
 ### PoC-3: VS Code拡張の実動作
 
-| # | 検証内容 | 合格基準 |
+| # | 検証内容 | 合格基準 | 判定 |
+|---|---|---|---|
+| 3-1 | Open VSX からのインストール | アプリ内から拡張の検索・インストールができる | **部分合格**(拡張ビュー組み込み+Open VSX API+CLI配置は確認済み。アプリ内UIからのワンクリックインストール操作のみ手動GUI確認が残項目) |
+| 3-2 | 実拡張の動作 | GitLens / ESLint(または Python) / カラーテーマの3種が activate し基本機能が動く | **合格**(3種すべて activate + 基本機能の実動作をログ・スクリーンショットで確認) |
+
+**結論: Theia本体(node_modules配下)は一切改変せず、`electron-app` への `@theia/plugin-ext` / `@theia/plugin-ext-vscode` / `@theia/vsx-registry`(全て1.71.2)の依存追加と、Open VSX からCLIダウンロードしたVSIXの `plugins/` ディレクトリ配置(展開)だけで、実VS Code拡張3種+言語ビルトイン1種が動作した。**
+
+#### 検証結果の詳細(3-1)
+
+- `@theia/vsx-registry` を依存に追加しただけで、ActivityBarに拡張ビュー(Extensions)が組み込まれ、検索ボックスは「Search Extensions in Open VSX」表示(接続先がOpen VSXであることのUI上の証跡)。ビューのプログラム的オープン(`vsxExtensions.toggle` コマンド実行)が成功し、スクリーンショット(`poc-artifacts/poc3-extensions-view.png`)でRECOMMENDED/INSTALLED/BUILT-INの3セクション描画を確認。
+- Open VSX REST API(`https://open-vsx.org/api/{namespace}/{name}/latest`)からのメタデータ取得・VSIXダウンロードは全拡張で成功(ネットワーク経路・レジストリ接続に問題なし)。
+- **アプリ内UIからの検索→ワンクリックインストール操作そのもの**はGUIレス検証環境では実施できず、CLIダウンロード+`plugins/`配置で代替した(この代替はPoC着手時に許容済み)。インストールUI操作は手動GUI確認の残項目。
+- ローカル配置の重要な仕様: `THEIA_DEFAULT_PLUGINS=local-dir:<絶対パス>` 環境変数または `theia start --plugins=local-dir:plugins` CLI引数で読み込まれるのは**展開済みディレクトリのみ**。`.vsix` ファイルをそのまま置いても `Only user plugins will be handled by file handlers, please unpack the plugin 'xxx.vsix' manually.` と警告されてスキップされる(システム/デフォルトプラグインは展開必須。`.vsix` のままのインストールはユーザープラグイン経路=アプリ内インストールのみ)。`unzip` で `plugins/<publisher>.<name>/` に展開して解決。なお package.json の `theiaPluginsDir` は `theia download:plugins`(ビルド時ヘルパー)専用で、**実行時のプラグイン探索には一切効かない**。
+
+#### 検証結果の詳細(3-2)
+
+検証環境: `poc-artifacts/poc3-workspace/`(git初期化済み、コミット1つ+未コミット変更、意図的にセミコロンを欠落させた `sample.js`、`.eslintrc.json`、ワークスペースローカルの `eslint@8.57.1`)をワークスペースとして起動。`ARSCHAT_POC3_AUTOTEST=1` 時のみ動作する検証コードで自動確認(スクリーンショット2枚: `poc-artifacts/poc3-main-window.png` / `poc3-extensions-view.png`、gitignore対象)。
+
+- **デプロイ**: `HostedPluginSupport.plugins` の実測ログで4拡張全てのデプロイを確認:
+  ```
+  [PoC-3][autotest] t+10s: deployed plugins (4): eamodio.gitlens@2026.7.30603, dbaeumer.vscode-eslint@3.0.24, dracula-theme.theme-dracula@2.25.1, vscode.javascript@1.95.3
+  ```
+- **GitLens (eamodio.gitlens@2026.7.30603)**: activate 成功(`~/.theia/globalStorage/eamodio.gitlens` が生成され、plugin host内でGitLensのfeature-flagクライアント(ConfigCat)が実行されるログあり = activate() 実行の直接証拠)。基本機能の実動作: (1) エディタ行内blame注釈「You, 10 hours ago | 1 author (You)」表示、(2) Commit Graph(webviewベース)がパネルに描画され、masterブランチ・コミット履歴・未コミット変更(変更ファイルバッジ)を正しく表示、(3) GitLens系ビューコンテナ(gitlens.views.home/timeline/scm.grouped等)がシェルに登録。**engines.vscode ^1.101.0 を要求する最新版が、より古いAPI水準のTheia 1.71.2でも動いた**(Theiaはenginesのsemverでインストール/ロードを拒否せず、実行時に呼ばれたAPIが存在すれば動く)。
+- **ESLint (dbaeumer.vscode-eslint@3.0.24)**: activate 成功+LSP往復の実動作を確認。`sample.js` をエディタで開くと、ESLint言語サーバーが lint を実行し、Theia の Problems マーカーとして診断が届いた:
+  ```
+  [PoC-3][autotest] t+26s: 2 problem marker(s) total
+  [PoC-3][autotest]   marker owner='eslint' uri='file:///c%3A/.../sample.js' message='Missing semicolon.'
+  [PoC-3][autotest] ESLint produced 2 marker(s) -> PASS (LSP round-trip works)
+  ```
+  スクリーンショットでもエディタ内の警告波線+エディタタブの「2」バッジ+Problemsパネルの「2」バッジを確認。
+- **カラーテーマ (dracula-theme.theme-dracula@2.25.1)**: `electron-app/package.json` の `theia.frontend.config.preferences` に `"workbench.colorTheme": "Dracula Theme"` を書くだけ(PoC-2のステータスバー非表示と同一のゼロコード機構)で、起動時からDraculaテーマが全面適用された。スクリーンショットでUI全体のDraculaパレット+JSシンタックスハイライト(テーマ+TextMateグラマー)を確認。テーマIDは拡張の `contributes.themes[].label`(`id`フィールドが無い場合)。
+- **重要な発見: 素のTheiaには言語定義が無い** — `@theia/monaco` は monaco-editor-core のみで、`.js`→`javascript` の言語ID関連付けやTextMateグラマーは**VS Codeビルトイン拡張**(`vscode.javascript` 等)が供給する。ビルトイン無しでは `sample.js` が `plaintext` で開かれ、ESLintのlanguage probe(`javascript` 言語IDにマッチ)が一切発火しない(エラーも出ず沈黙するため原因特定に時間を要した)。Open VSX の `vscode/javascript`(1.95.3)を plugins/ に追加して解決。**本移行では eclipse-theia.builtin-extension-pack 等のビルトイン一式の同梱が必須になる**。
+- **ワークスペーストラスト**: 初回起動時「Do you trust the authors of the files in this folder?」ダイアログが表示され、承認するまでプラグインの activate が(テーマ適用含めて)ブロックされる。GUIレス検証では `"security.workspace.trust.enabled": false` を preference デフォルトに設定して回避した。製品では信頼ダイアログの扱い(無効化 or カスタムUI)の設計判断が必要。
+
+#### 確認された非致命的な問題(記録)
+
+| 事象 | 影響 | 対処 |
 |---|---|---|
-| 3-1 | Open VSX からのインストール | アプリ内から拡張の検索・インストールができる |
-| 3-2 | 実拡張の動作 | GitLens / ESLint(または Python) / カラーテーマの3種が activate し基本機能が動く |
+| `plugin-host ERROR ... Unknown Webview: <uuid>` が起動時に数回 | GitLensのwebview復元レースと推定。Commit Graph webview自体は正常動作 | 放置可(要経過観察) |
+| `plugin-host ERROR Failed to parse command arguments: SyntaxError: Bad escaped character in JSON`(GitLensのStatusBarItemツールチップ処理) | ステータスバーツールチップの一部が描画されない可能性(ステータスバー自体を非表示にしているため実害なし) | 放置可 |
+| `plugin-manager WARN Unsupported activation events: onTerminal:*` | GitLensのターミナル連携がactivationイベントとしては発火しない(Theia 1.71.2未実装) | 記録のみ |
+| `@theia/plugin-ext` が `@theia/debug`/`scm`/`search-in-workspace`/`test`/`notebook` 等を推移的に持ち込み、PoC-2で構造的に排除していた「Run」メニュー・ActivityBar項目(検索/SCM/デバッグ/テスト等)が復活 | IDE色の再流入。PoC-2の「依存に入れなければ出ない」戦略はplugin-ext導入後は成立しない | Phase 1で `FilterContribution` の対象を拡大して再希釈(PoC-2で確立済みの手法で対応可能な見込み)。PoC-3の判定には影響させない |
+| `@vscode/windows-ca-certs`(optionalなネイティブ依存)のビルド失敗でwebpackがエラー停止 | ビルド不能(PoC-3最大のハマり) | `electron-app/webpack.config.js`(自前ファイル)でIgnorePlugin登録。詳細はBUILD_NOTES.md |
+
+#### 残る手動GUI確認項目
+
+- 拡張ビューでのOpen VSX検索→ワンクリックインストール→アンインストールの操作系(3-1の完全合格条件)
+- ESLint quick fix(電球アイコン)等のエディタ内インタラクション
 
 ### PoC-4: Theia AI + Anthropic + MCP
 
@@ -132,6 +176,6 @@ Neo4j 廃止の技術検証。**追加ダウンロード無し**が要件。
 - [x] 足場: generator-theia-extension で Electron アプリ生成、ビルド・起動確認(詳細は `BUILD_NOTES.md` 参照。Theia 1.71.2 / yarn 1.22.22。起動ログ上エラーなし、`ready` 状態到達、electron.exeプロセス生存確認済み)
 - [x] PoC-1: 1-1/1-2/1-3 すべて合格。Theia本体無改変、`arschat-core` の electron-main 拡張(DI rebind + contribution)のみで実現。詳細は上表および `BUILD_NOTES.md` 参照。globalShortcutの実キー入力とウィジェット/トレイの見た目は手動GUI確認が残項目。
 - [x] PoC-2: 2-1/2-2/2-3 すべて合格。Theia本体無改変、`arschat-core` の frontend 拡張(既存 `ArschatCoreWidget` の main エリア化 + `FrontendApplicationContribution` + `FilterContribution`)と `electron-app/package.json` の `theia.frontend.config` 設定のみで実現。SCM/Debug/Search-in-workspaceのActivityBar項目・メニューは依存関係に含まれておらず構造的に非表示(追加対応不要)。詳細は上表および `BUILD_NOTES.md` 参照。スクリーンショットは `poc-artifacts/poc2-main-window.png`(gitignore対象、リポジトリ非同梱)。
-- [ ] PoC-3
+- [x] PoC-3: 3-1 部分合格(拡張ビュー組み込み・Open VSX接続・CLI配置での拡張導入は確認済み、アプリ内インストールUI操作のみ手動GUI確認が残項目)/ 3-2 合格(GitLens・ESLint・Draculaテーマの3種+vscode.javascriptビルトインがactivateし基本機能が実動作: GitLens行内blame+Commit Graph webview、ESLintのLSP診断がProblemsマーカーに到達、テーマ全面適用)。Theia本体無改変。`electron-app` に `@theia/plugin-ext`/`plugin-ext-vscode`/`vsx-registry`(1.71.2)を追加、VSIXはOpen VSXからCLIダウンロードして `electron-app/plugins/` に**展開して**配置(`theia start --plugins=local-dir:plugins`)。最大のハマりは (1) `@vscode/windows-ca-certs` optionalネイティブ依存のビルド失敗でwebpack停止(webpack.config.jsのIgnorePluginで解決)、(2) 素のTheiaに言語定義が無く `.js` が plaintext になりESLintが沈黙(vscode.javascriptビルトイン追加で解決)、(3) ワークスペーストラストダイアログがactivateをブロック(preferenceで無効化)。詳細は上表および `BUILD_NOTES.md` 参照。スクリーンショットは `poc-artifacts/poc3-main-window.png` / `poc3-extensions-view.png`(gitignore対象)。
 - [ ] PoC-4
 - [x] PoC-5: 5-1/5-2/統合デモすべて合格。`poc-graphrag/`(独立npmパッケージ、Theia組み込みはスコープ外)でbetter-sqlite3+sqlite-vecによるベクター検索と再帰CTEによるグラフk-hop探索、両者を組み合わせたGraphRAG最小パイプラインが動作することを確認。「追加ダウンロード無し」要件はbetter-sqlite3をv12系以降に固定する前提で満たせる(v11系はNode v24向けプリビルド未提供の既知問題あり)。詳細は上表および `poc-graphrag/README.md` 参照。Electron実機組み込み検証(ASARアンパック設定・electron-rebuild)は未実施(情報収集のみ、スコープ外)。
