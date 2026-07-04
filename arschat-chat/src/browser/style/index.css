@@ -18,12 +18,30 @@
     border-bottom: 1px solid var(--theia-editorGroup-border, #444);
     display: flex;
     align-items: center;
+    gap: 12px;
 }
 
 .arschat-chat-header-title {
     font-size: 14px;
     font-weight: 600;
     color: var(--theia-foreground);
+}
+
+.arschat-chat-header-controls {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.arschat-provider-select,
+.arschat-model-select {
+    font-size: 12px;
+    max-width: 220px;
+}
+
+.arschat-chat-cursor {
+    opacity: 0.6;
 }
 
 .arschat-chat-messages {

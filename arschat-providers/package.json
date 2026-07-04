@@ -12,6 +12,10 @@
     "src"
   ],
   "dependencies": {
+    "@theia/ai-anthropic": "1.71.2",
+    "@theia/ai-chat": "1.71.2",
+    "@theia/ai-core": "1.71.2",
+    "@theia/ai-openai": "1.71.2",
     "@theia/core": "1.71.2"
   },
   "devDependencies": {

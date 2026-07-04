@@ -1718,6 +1718,18 @@
     "@theia/core" "1.71.2"
     "@theia/workspace" "1.71.2"
 
+"@theia/ai-openai@1.71.2":
+  version "1.71.2"
+  resolved "https://registry.yarnpkg.com/@theia/ai-openai/-/ai-openai-1.71.2.tgz#086d1fd39273af8fbe4b23a17cdc510b86ae07d0"
+  integrity sha512-FyzyH4UIWmTQwOT18eBSCsphYa/XUss+HgHAIlE46bo/rThTNpOhhYV8yKUTylxiAg8eU84gXyFVhfSmoUKRDw==
+  dependencies:
+    "@theia/ai-core" "1.71.2"
+    "@theia/core" "1.71.2"
+    "@theia/filesystem" "1.71.2"
+    "@theia/workspace" "1.71.2"
+    openai "^6.33.0"
+    tslib "^2.6.2"
+
 "@theia/application-manager@1.71.2":
   version "1.71.2"
   resolved "https://registry.yarnpkg.com/@theia/application-manager/-/application-manager-1.71.2.tgz#327a22b8c8feec89416b2f6d2692f8f1e78d4d59"
@@ -8632,6 +8644,11 @@ open@^7.4.2:
   dependencies:
     is-docker "^2.0.0"
     is-wsl "^2.1.1"
+
+openai@^6.33.0:
+  version "6.45.0"
+  resolved "https://registry.yarnpkg.com/openai/-/openai-6.45.0.tgz#53840c5c5848884dfbff47006f839b27d1d955b9"
+  integrity sha512-5DQVNErssk0afNpTTHUm/qZPU4iKR9OYdNid8Ib4puq4gHNNvGWZht2zY4h9a8JMF949Ik6m8gQutllVPbjdnw==
 
 opener@^1.5.1:
   version "1.5.2"

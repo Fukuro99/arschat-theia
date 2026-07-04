@@ -130,7 +130,7 @@ arschat-theia/
 | MS | 内容 | 完了条件 |
 |---|---|---|
 | M1 | パッケージ再編(§2)+PoC検証コードの整理(autotest群をfeature flag化) | 再編後もPoC全項目の起動確認が通る ✅ **完了 2026-07-04**(arschat-core解体→branding/providers/chat/agents/tools。完了条件1-5全PASS、詳細はBUILD_NOTES.md「Phase 1 M1 実装メモ」) |
-| M2 | プロバイダ4種切替(§4) | 各プロバイダとの実チャット往復(Unsloth Studioは仕様確認でき次第) |
+| M2 | プロバイダ4種切替(§4) | 各プロバイダとの実チャット往復(Unsloth Studioは仕様確認でき次第) ✅ **実装完了 2026-07-04・ライブ検証は 0/4(環境制約でSKIP)**。4プロバイダのモデルがLanguageModelRegistryに登録・ヘッダーのドロップダウンで即時切替可能・切替がagentのモデル解決に反映されることを実機ログで確認。**§10リスク精査結論: フロントエンドのLanguageModelRegistryが`AISettingsService.updateAgentSettings`の`languageModelRequirements`を自動参照し、agent自身のセレクタより優先する(node_modules実測)。ProviderSwitchServiceはこの経路とagentインスタンスフィールド直書きの両方を駆動**。ライブ往復(PONG)は APIキー/ローカルサーバ不在のため4/4 SKIP、検証手順はBUILD_NOTES.md「Phase 1 M2 実装メモ」に記載。詳細同メモ参照 |
 | M3 | 自前チャットWidget+SessionStore+履歴パネル(§5) | ストリーミング・履歴復元・セッション切替が動く |
 | M4 | ペルソナ+スキル(§6) | ペルソナ切替でシステムプロンプトが変わる、/スキルが補完・展開される |
 | M5 | ツール+承認+MCPインポート(§7) | run_commandが承認ダイアログ経由で実行される |

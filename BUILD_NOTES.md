@@ -398,3 +398,92 @@ arschat-theia/
 - **lerna依存順**: branding は arschat-chat の `lib`(informational renderer)を import する。`yarn install`→`lerna run prepare` は package.json の依存関係からトポロジ順を解決するため、branding に `"arschat-chat": "0.0.1"` を宣言しておけば chat が先にビルドされる。宣言し忘れると branding の tsc が `arschat-chat/lib/...` を解決できず失敗する(宣言済みで問題なし)。
 - **poc4 autotest の renderer import パス**: 旧 `./arschat-informational-part-renderer`(同一パッケージ相対)を、renderer移動先の `arschat-chat/lib/browser/arschat-informational-part-renderer`(workspace越えのビルド出力参照)に変更する必要があった。TS的にはソース(`src`)ではなく `lib`(=package `files`/`main`解決)を指す点に注意。
 - **electron-main autotest の REPO_ROOT**: `path.resolve(__dirname, '..','..','..')` は `arschat-branding/lib/electron-main/` から3つ上=リポルート。arschat-core も arschat-branding もリポ直下の同階層なので算出結果は不変、修正不要だった(確認済み)。
+
+## Phase 1 M2 実装メモ (プロバイダ4種切替)
+
+作成: 2026-07-04 / 対象: PHASE1_DESIGN.md §3・§4・§9 M2・§10・§11。OpenAI / Anthropic / LM Studio / Unsloth Studio の4プロバイダを設定でき、チャットヘッダーのドロップダウンから即時切替できる状態を実装。**Theia本体(node_modules配下)は一切改変していない。全パッケージ 1.71.2 ピン留め維持。**
+
+### §10 リスク精査の結論(最重要): AISettingsService の上書きは agent のモデル解決に自動反映される
+
+M2冒頭で node_modules を読み(改変なし)、§4.2/§10 の未確認事項「`AbstractStreamParsingChatAgent` が `AISettingsService.updateAgentSettings` で上書きした `languageModelRequirements` を自動で読むか」を確定させた。**結論: フロントエンドの LanguageModelRegistry 実装が AISettingsService を自動参照し、しかも agent 自身のセレクタより優先する。** 根拠は以下2ファイル:
+
+1. `node_modules/@theia/ai-core/lib/browser/frontend-language-model-registry.js` の `selectLanguageModels()`:
+   ```js
+   const userSettings = (await this.settingsService.getAgentSettings(request.agent))
+       ?.languageModelRequirements?.find(req => req.purpose === request.purpose);
+   const identifier = userSettings?.identifier ?? request.identifier;
+   ```
+   → `request.identifier`(=agent のインスタンスフィールド由来のセレクタ)より、AISettingsService 側の `identifier` が **`??` の左辺として優先**される。
+2. `node_modules/@theia/ai-chat/lib/common/chat-agents.js` の `AbstractChatAgent`:
+   ```js
+   getLanguageModelSelector(purpose) { return this.languageModelRequirements.find(r => r.purpose === purpose); }
+   selectLanguageModel(selector) { return this.languageModelRegistry.selectLanguageModel({ agent: this.id, ...selector }); }
+   ```
+   → agent は自分の `languageModelRequirements`(インスタンスフィールド)からセレクタを作って registry に渡すだけ。registry 側が上記(1)で AISettingsService を上乗せする。
+
+補足: `node_modules/@theia/ai-core/lib/common/language-model.js` の**バックエンド/common 実装**の `selectLanguageModels()` は AISettingsService を読まない(TODOコメントあり)。**この違いは重要**で、ArsChat agent はフロントエンドで動き `LanguageModelRegistry` はフロントエンド実装にバインドされるため、AISettingsService 参照経路が有効になる。
+
+**設計判断: 両方式を併用(belt-and-suspenders)。** ProviderSwitchService は切替時に (a) `AISettingsService.updateAgentSettings(agentId, { languageModelRequirements })`(registry が native に参照する経路)と (b) ライブ agent インスタンスの `languageModelRequirements` フィールド直書き(base class の fallback 経路)の**両方**を更新する。将来の Community Release で優先順位が変わっても、どちらか一方が効けば解決が壊れない。§4.2 が推奨した「agent 側で明示参照」は、(b) を agent インスタンスに保持することで満たしている(実測では (a) だけで解決していることも autotest ログの `agentRequirementIdentifier` 一致で確認済み)。
+
+### 実装構成
+
+新規パッケージ実装(§2 のスケルトンを実体化):
+
+- **arschat-providers**(§4 の中核):
+  - `arschat-provider-preferences.ts`: ArsChat独自の `arschat.provider.active` / `arschat.provider.model` preference(PreferenceContribution + PreferenceProxy)と、4プロバイダの記述子 `PROVIDERS`(各プロバイダの LanguageModel id 生成規則を含む)。
+  - `provider-switch-service.ts`: `ProviderSwitchService`。active preference → registered LanguageModel id を解決し、上記(a)(b)両経路で agent のモデル要求を駆動。`ARSCHAT_CHAT_AGENT_ID = 'ArsChat'` 定数もここに置き(agents/autotest が循環依存なしに共有)。
+  - `arschat-providers-seed-contribution.ts`: 起動時に LM Studio(`http://localhost:1234/v1`)/ Unsloth Studio(`http://localhost:8000/v1`)を `ai-features.openAiCustom.customOpenAiModels` に id `lmstudio` / `unsloth` で**未登録時のみ**追加(ユーザー編集は上書きしない)。
+  - `arschat-m2-autotest-contribution.ts`(frontend): `ARSCHAT_M2_AUTOTEST=1` 時のみ、登録 LanguageModel 一覧ログ・各プロバイダのライブ往復(可能なら)・切替動作の検証。
+- **arschat-agents**(M4本実装とは別の暫定 agent、§4.2/§6):
+  - `arschat-chat-agent.ts`: `ArschatChatAgent extends AbstractStreamParsingChatAgent`。固定システムプロンプト(`getSystemMessageDescription` を override して返す)、`languageModelRequirements` は非readonly でProviderSwitchServiceが書き換え可能、`defaultLanguageModelPurpose = 'chat'`。
+  - `arschat-agents-frontend-module.ts`: 起動時に `ChatAgentService.registerChatAgent` + `AgentService.registerAgent`(Theia純正 `CustomAgentFactory` と同じ二段登録パターン)、続けて `ProviderSwitchService.registerAgent` で agent をswitch serviceに接続。
+- **arschat-chat**(ヘッダーUI + 実配線、§4.2/§5):
+  - `arschat-chat-widget.tsx`: M1のダミーUIを実装化。ヘッダーにプロバイダ/モデルの2ドロップダウン(ProviderSwitchServiceと双方向同期)、入力欄→`ChatService.sendRequest`→ArsChat agent→ストリーミング応答表示。
+
+依存追加(すべて1.71.2、`@theia/ai-openai` を electron-app / browser-app / arschat-providers に追加。ai-openai の frontend+backend モジュールは theiaExtensions で自動登録)。
+
+### プロバイダごとの LanguageModel id 規則(node_modules 実測)
+
+- Anthropic: `anthropic/<model>`(`anthropic-frontend-application-contribution.js` の `${ANTHROPIC_PROVIDER_ID}/${modelId}`)
+- OpenAI official: `openai/<model>`(`openai-frontend-application-contribution.js` の `createOpenAIModelDescription`、`OPENAI_PROVIDER_ID='openai'`)
+- LM Studio / Unsloth(custom): **id はプレフィックスなしの生の `id`**。`createCustomModelDescriptionsFromPreferences` が `id: pref.id ?? pref.model` とするため、`customOpenAiModels[].id='lmstudio'` なら LanguageModel id はそのまま `lmstudio`。この差分(custom は無プレフィックス)を ProviderSwitchService の id 解決に反映済み。
+
+### 検証結果(ARSCHAT_M2_AUTOTEST=1、実機ログ)
+
+- **登録 LanguageModel 一覧**: PASS。13モデルが登録され4プロバイダ全て可視:
+  - `anthropic/*` 5件(status=unavailable「No Anthropic API key set」)
+  - `openai/*` 6件(status=unavailable「No OpenAI API key set」)
+  - `lmstudio` 1件(status=ready ※custom は url があれば常時 ready 扱い)
+  - `unsloth` 1件(status=ready)
+- **切替動作**: PASS。4プロバイダそれぞれに切替 → agent の `languageModelRequirements[chat].identifier` が解決 id と一致することをログで確認(`resolvedModelId === agentRequirementIdentifier`、全4件一致)。これが§10リスク解消の実証。
+- **ライブ往復(プロンプト "Reply with exactly: PONG")**: **4/4 SKIP**(この検証環境の制約):
+  - Anthropic: SKIP(`ANTHROPIC_API_KEY` 未設定)
+  - OpenAI: SKIP(`OPENAI_API_KEY` 未設定)
+  - LM Studio: SKIP(`http://localhost:1234/v1/models` 無応答)
+  - Unsloth Studio: SKIP(`http://localhost:8000/v1/models` / `:8888` 無応答)
+- **スクリーンショット**: PASS。`poc-artifacts/m2-provider-switch.png`(94KB)にチャットUIのヘッダーでプロバイダ「Unsloth Studio」/モデル「unsloth」ドロップダウンが見える状態を保存。
+- **ビルド**: PASS。全5パッケージ tsc エラー0、`theia build --mode development` webpack `compiled successfully`。生成 frontend に ai-openai / arschat-providers / arschat-agents モジュール登録、backend に ai-openai backend モジュール登録を確認。
+- **jest**(arschat-chat): PASS(2/2、ドロップダウンにプロバイダ選択肢が出ることを含む)。
+
+### ライブ検証手順(ユーザー向け、環境が整ったら)
+
+各プロバイダを実際に往復確認する手順。`ARSCHAT_M2_AUTOTEST=1` を付けると起動12秒後に自動でライブ往復を試行しログ(`[M2][autotest]`)に出力する。手動確認はヘッダーのドロップダウンで対象プロバイダを選び、入力欄に `Reply with exactly: PONG` と送って `PONG` が返ればOK。
+
+1. **Anthropic**: `sk-ant-...` を用意。PowerShell 例:
+   ```powershell
+   $env:ANTHROPIC_API_KEY = "sk-ant-..."; $env:ARSCHAT_M2_AUTOTEST = "1"; npm --prefix electron-app run start
+   ```
+   ログに `Anthropic: live round-trip reply='PONG' -> PASS` が出れば合格。
+2. **OpenAI**: `sk-...` を用意し `$env:OPENAI_API_KEY` を設定して同様に起動。official モデルは `ai-features.openAiOfficial.officialOpenAiModels`(デフォルトで gpt-5.x 系が登録済み)。
+3. **LM Studio**: LM Studio アプリでモデルをロードし「Local Server」を起動(標準 `http://localhost:1234`)。preference の `customOpenAiModels[id=lmstudio].model` を実際にロードしたモデル名に合わせると確実。起動後、ヘッダーで「LM Studio」を選び往復。`http://localhost:1234/v1/models` が応答すれば autotest も自動実行する。
+4. **Unsloth Studio**: Unsloth Studio の OpenAI互換サーバを起動(`http://localhost:8000/v1`、環境により `:8888`)。`customOpenAiModels[id=unsloth]` の `url` と `apiKey`(`sk-unsloth-...`)を実値に更新。ヘッダーで「Unsloth Studio」を選び往復。ポートが `:8888` の場合は `url` を `http://localhost:8888/v1` に変更する。
+
+いずれも API キー / URL は preference(`ai-features.anthropic.*` / `ai-features.openAiOfficial.*` / `ai-features.openAiCustom.customOpenAiModels`)または環境変数で設定する。**preference 平文保存の注意**は Theia 純正のスキーマ説明に明記されており(「安全にしたければ環境変数を使え」)、Phase 1 では preference+環境変数運用。KeyStoreService(OSキーチェーン)連携は §4.2 通り M5 ストレッチ。
+
+### ハマった点
+
+1. **preference 系シンボルの import 元**: `PreferenceService` / `PreferenceContribution` / `PreferenceProxy` / `createPreferenceProxy` は `@theia/core/lib/browser/preferences` のバレルには**無く**(そこは preference-contribution と validation のみ再輸出)、`@theia/core` トップレベルバレルから取る(ai-openai 本体もそうしている)。`PreferenceSchema` 型だけは `@theia/core/lib/common/preferences/preference-schema` のサブパスから。M1/PoC で繰り返し出ている「型は core バレル、定数はサブパス」パターンの続き。
+2. **`PreferenceSchema` にトップレベル `type: 'object'` は書けない**: スキーマ型は `{ properties, scope?, ... }` で `type` を持たない(ai-core の schema 定義に倣う)。書くと TS2353。
+3. **custom endpoint の LanguageModel id が無プレフィックス**: 上述の通り official は `openai/` 付き、custom は生 id。最初 `openai/lmstudio` になると勘違いしかけたが、`createCustomModelDescriptionsFromPreferences` を読んで `id: pref.id ?? pref.model` と確定。ProviderSwitchService の `fixedModelId` で吸収した。
+4. **GUIレス環境のスクリーンショットが loading spinner のまま撮れる**: この環境ではワークベンチシェルの attach が frontend page start から ~30秒と遅く、電メイン側の固定ディレイ(t+18s)では読み込み中オーバーレイ(~6KB PNG)しか撮れなかった。対策として capturePage をリトライ化し、**PNGサイズがしきい値(30KB)未満なら「まだ描画前」と判断して4秒間隔でリトライ**、描画済みシェル(~94KB)を撮れるまで待つ方式にした(`show()`/`focus()`/`moveTop()` でサーフェス可用化も併用)。M1 の「初回失敗・再runで成功」の揺らぎを、単一runで自己解決する形に強化。
+5. **`ChatService.getAgent` によるルーティング**: `ChatService.sendRequest` は `getAgent(parsedRequest, session)` でハンドラを決める(pinnedAgent / @mention / default agent)。ArsChat agent に確実に流すため、`createSession(undefined, { focus: false }, agent)` で agent を **pinnedAgent** として渡す方式にした(default agent preference に依存しない)。
