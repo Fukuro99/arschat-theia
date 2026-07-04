@@ -1,29 +1,39 @@
 // *****************************************************************************
-// ArsChat chat agent (PHASE1_DESIGN.md §4.2 / §6, M2 stopgap).
+// ArsChat chat agent (PHASE1_DESIGN.md §4.2 / §6, M4 production implementation).
 //
-// A minimal ChatAgent brought forward from M4 so M2 can prove a full chat
-// round-trip across all four providers. The real persona-driven agent (dynamic
-// system-prompt composition, skills) lands in M4 - this one has a single fixed
-// system prompt.
+// ---- Agent-registration approach (§6 decision, rationale recorded here) ----
 //
-// Model resolution: its `languageModelRequirements` is driven live by
-// ProviderSwitchService (arschat-providers). When the user flips the header
-// dropdown, the switch service rewrites this agent's requirement AND the
-// AISettingsService override, so `AbstractStreamParsingChatAgent.getLanguageModel`
-// resolves the newly-active provider's model. See provider-switch-service.ts
-// for the §10 risk analysis proving this is the correct wiring.
+// §6 offered two options for "persona = dynamic ChatAgent":
+//   (a) evolve the single ArsChat agent so it reflects the ACTIVE persona, or
+//   (b) register one ChatAgent per persona.
+// We chose (a). Rationale:
+//   - The M2 ProviderSwitchService already drives THIS one agent's model
+//     requirement and the widget pins THIS agent id ('ArsChat') as the session
+//     handler. Keeping a single stable agent id preserves all of that wiring
+//     (session routing, pinnedAgent, provider switch) unchanged.
+//   - Personas are edited frequently (CRUD). Re-registering/unregistering a
+//     ChatAgent on every persona create/edit/delete is more moving parts and
+//     more failure surface (dangling registrations, stale pinned agents) for
+//     zero user-visible benefit - §6 itself notes "UX上の差異なし".
+//   - The system prompt is supplied dynamically: getSystemMessageDescription()
+//     is called by AbstractChatAgent per request, so it reads the active
+//     persona's COMPOSED prompt from PersonaService AT SEND TIME. Switching or
+//     editing a persona changes the next send's system prompt with no restart
+//     and no re-registration.
+// The dynamic-registration API (registerChatAgent/unregisterChatAgent) confirmed
+// in §11 is still exercised: the agent is registered once at startup (see
+// arschat-agents-frontend-module.ts).
+//
+// Model resolution is unchanged from M2: languageModelRequirements is driven live
+// by ProviderSwitchService (both the AISettingsService override the registry
+// prefers AND the instance field the base class falls back to).
 // *****************************************************************************
 
-import { injectable } from '@theia/core/shared/inversify';
+import { inject, injectable } from '@theia/core/shared/inversify';
 import { AbstractStreamParsingChatAgent, ChatAgentLocation, SystemMessageDescription } from '@theia/ai-chat/lib/common/chat-agents';
 import { LanguageModelRequirement } from '@theia/ai-core';
 import { ARSCHAT_CHAT_AGENT_ID, ARSCHAT_CHAT_PURPOSE } from 'arschat-providers/lib/browser/provider-switch-service';
-
-const ARSCHAT_SYSTEM_PROMPT = [
-    'You are ArsChat, a helpful desktop AI assistant.',
-    'Answer concisely and follow the user\'s instructions exactly.',
-    'When the user asks you to reply with an exact string, reply with only that string and nothing else.'
-].join(' ');
+import { PersonaService } from './persona-service';
 
 @injectable()
 export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
@@ -31,11 +41,14 @@ export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
     readonly id = ARSCHAT_CHAT_AGENT_ID;
     readonly name = ARSCHAT_CHAT_AGENT_ID;
 
-    override description = 'ArsChat default chat agent. Routes chat to the provider/model selected in the ArsChat header (Anthropic / OpenAI / LM Studio / Unsloth Studio).';
+    override description = 'ArsChat default chat agent. System prompt reflects the active ArsChat persona (and its skills catalogue); model follows the header provider/model selection (Anthropic / OpenAI / LM Studio / Unsloth Studio).';
 
     override readonly locations = ChatAgentLocation.ALL;
 
     protected override readonly defaultLanguageModelPurpose = ARSCHAT_CHAT_PURPOSE;
+
+    @inject(PersonaService)
+    protected readonly personaService!: PersonaService;
 
     /**
      * Non-readonly so ProviderSwitchService can rewrite it on provider switch.
@@ -45,7 +58,14 @@ export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
      */
     languageModelRequirements: LanguageModelRequirement[] = [{ purpose: ARSCHAT_CHAT_PURPOSE }];
 
+    /**
+     * Called by AbstractChatAgent per request. Reads the ACTIVE persona's composed
+     * system prompt from PersonaService at send time, so persona switch/edit takes
+     * effect immediately (no restart, no re-registration).
+     */
     protected override async getSystemMessageDescription(): Promise<SystemMessageDescription | undefined> {
-        return { text: ARSCHAT_SYSTEM_PROMPT };
+        await this.personaService.ready();
+        const text = this.personaService.getActiveEffectiveSystemPrompt();
+        return text ? { text } : undefined;
     }
 }

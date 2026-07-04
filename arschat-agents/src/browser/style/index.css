@@ -1,0 +1,133 @@
+/* ArsChat persona management panel (M4). */
+
+.arschat-persona-root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    color: var(--theia-foreground);
+    font-size: 13px;
+}
+
+.arschat-persona-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--theia-editorGroup-border, #444);
+}
+
+.arschat-persona-title {
+    font-weight: 600;
+    flex: 1 1 auto;
+}
+
+.arschat-persona-list {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 6px;
+}
+
+.arschat-persona-item {
+    display: flex;
+    align-items: stretch;
+    border-radius: 6px;
+    margin-bottom: 4px;
+}
+
+.arschat-persona-item.active {
+    background: var(--theia-list-activeSelectionBackground, rgba(99, 102, 241, 0.2));
+}
+
+.arschat-persona-item:hover {
+    background: var(--theia-list-hoverBackground, rgba(255, 255, 255, 0.06));
+}
+
+.arschat-persona-select-row {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 8px 10px;
+    background: transparent;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+    color: inherit;
+}
+
+.arschat-persona-name {
+    font-weight: 600;
+}
+
+.arschat-persona-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: var(--theia-button-background, #0e639c);
+    color: var(--theia-button-foreground, #fff);
+}
+
+.arschat-persona-prompt-preview {
+    font-size: 11px;
+    opacity: 0.65;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+.arschat-persona-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding-right: 6px;
+}
+
+.arschat-persona-icon {
+    background: transparent;
+    border: none;
+    color: var(--theia-icon-foreground, inherit);
+    opacity: 0.6;
+    cursor: pointer;
+    padding: 4px 6px;
+}
+
+.arschat-persona-icon:hover {
+    opacity: 1;
+}
+
+/* ---- inline editor ---- */
+.arschat-persona-editor {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--theia-editorGroup-border, #444);
+    background: var(--theia-editorWidget-background, #252526);
+}
+
+.arschat-persona-editor-title {
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.arschat-persona-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.arschat-persona-field > span {
+    font-size: 11px;
+    opacity: 0.8;
+}
+
+.arschat-persona-prompt-input {
+    resize: vertical;
+    font-family: inherit;
+}
+
+.arschat-persona-editor-buttons {
+    display: flex;
+    gap: 8px;
+}

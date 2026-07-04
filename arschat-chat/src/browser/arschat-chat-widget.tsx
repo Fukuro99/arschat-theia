@@ -33,6 +33,10 @@ import {
     PROVIDERS
 } from 'arschat-providers/lib/browser/arschat-provider-preferences';
 import { ProviderSwitchService, ARSCHAT_CHAT_AGENT_ID } from 'arschat-providers/lib/browser/provider-switch-service';
+import { PersonaService } from 'arschat-agents/lib/browser/persona-service';
+import { SkillService } from 'arschat-agents/lib/browser/skill-service';
+import { Persona } from 'arschat-agents/lib/common/persona';
+import { Skill } from 'arschat-agents/lib/common/skill';
 import { renderMarkdown } from './arschat-markdown';
 import { parseThinkBlocks } from './arschat-think';
 import { ArschatChatUiService } from './arschat-chat-ui-service';
@@ -72,6 +76,12 @@ export class ArschatChatWidget extends ReactWidget {
     @inject(ChatAgentService)
     protected readonly chatAgentService!: ChatAgentService;
 
+    @inject(PersonaService)
+    protected readonly personaService!: PersonaService;
+
+    @inject(SkillService)
+    protected readonly skillService!: SkillService;
+
     @inject(ArschatChatUiService)
     protected readonly uiService!: ArschatChatUiService;
 
@@ -89,6 +99,13 @@ export class ArschatChatWidget extends ReactWidget {
     protected provider: ArschatProviderKind = 'anthropic';
     protected model = '';
     protected modelsByProvider: Map<ArschatProviderKind, LanguageModel[]> = new Map();
+
+    // ---- persona + skills (M4) ----
+    protected personas: Persona[] = [];
+    protected activePersonaId = '';
+    /** slash-command skill suggestions currently shown under the input. */
+    protected slashSuggestions: Skill[] = [];
+    protected suggestionIndex = 0;
 
     protected readonly toDispose = new DisposableCollection();
 
@@ -124,6 +141,25 @@ export class ArschatChatWidget extends ReactWidget {
         this.toDispose.push(this.uiService.onLoadSessionRequested(id => this.loadSession(id)));
         this.toDispose.push(this.uiService.onNewSessionRequested(() => this.startNewSession()));
 
+        // Personas + skills (M4).
+        await this.refreshPersonas();
+        this.toDispose.push(this.personaService.onDidChange(() => { this.refreshPersonas(); }));
+        await this.skillService.ready();
+        this.toDispose.push(this.skillService.onDidChange(() => this.update()));
+
+        this.update();
+    }
+
+    protected async refreshPersonas(): Promise<void> {
+        await this.personaService.ready();
+        this.personas = this.personaService.getPersonas();
+        this.activePersonaId = this.personaService.getActivePersonaId();
+        this.update();
+    }
+
+    protected async onPersonaChange(id: string): Promise<void> {
+        await this.personaService.setActivePersona(id);
+        this.activePersonaId = id;
         this.update();
     }
 
@@ -323,6 +359,14 @@ export class ArschatChatWidget extends ReactWidget {
             return;
         }
         this.sending = true;
+        this.slashSuggestions = [];
+
+        // Slash-command skill expansion (M4): if the input starts with a known
+        // skill trigger, send the skill BODY (+ trailing user text) as the request
+        // text while displaying the original `/trigger ...` line.
+        const expansion = this.skillService.expandInput(text);
+        const requestText = expansion ? expansion.expanded : text;
+        const displayText = expansion ? expansion.display : undefined;
 
         const attachedPreviews = this.pendingImages.map(img => img.previewUrl);
         const variables: AIVariableResolutionRequest[] = this.pendingImages.map(img =>
@@ -333,7 +377,8 @@ export class ArschatChatWidget extends ReactWidget {
         this.messages.push({
             id: this.nextId++,
             author: 'user',
-            text,
+            // Show the original slash line if we expanded, otherwise the raw text.
+            text: displayText ?? text,
             images: attachedPreviews.length > 0 ? attachedPreviews : undefined
         });
         this.inputValue = '';
@@ -345,10 +390,10 @@ export class ArschatChatWidget extends ReactWidget {
 
         try {
             const modelId = this.switchService.resolveActiveModelId();
-            console.log(`[arschat-chat] sending request (provider='${this.provider}', model='${this.model}', resolved LanguageModel id='${modelId ?? '<none>'}', images=${imagesForModel.length})`);
+            console.log(`[arschat-chat] sending request (provider='${this.provider}', model='${this.model}', persona='${this.activePersonaId}', skill=${expansion ? 'yes' : 'no'}, resolved LanguageModel id='${modelId ?? '<none>'}', images=${imagesForModel.length})`);
             const invocation = await this.chatService.sendRequest(
                 this.getSessionId(),
-                { text, variables: variables.length > 0 ? variables : undefined }
+                { text: requestText, displayText, variables: variables.length > 0 ? variables : undefined }
             );
             if (!invocation) {
                 assistant.text = '(error: no chat session)';
@@ -418,6 +463,76 @@ export class ArschatChatWidget extends ReactWidget {
         this.update();
     }
 
+    // ---------------------------------------------------------------- slash completion (M4)
+
+    /** Recompute the slash-command skill suggestions from the current input. */
+    protected updateSlashSuggestions(value: string): void {
+        if (value.startsWith('/') && !value.includes('\n')) {
+            const spaceIdx = value.indexOf(' ');
+            if (spaceIdx < 0) {
+                // still typing the trigger -> show matching skills
+                this.slashSuggestions = this.skillService.filterByQuery(value);
+                this.suggestionIndex = 0;
+                return;
+            }
+        }
+        this.slashSuggestions = [];
+        this.suggestionIndex = 0;
+    }
+
+    protected onInputChange(value: string): void {
+        this.inputValue = value;
+        this.updateSlashSuggestions(value);
+        this.update();
+    }
+
+    /** Accept a suggestion: set the input to `/trigger ` and dismiss the popup. */
+    protected selectSuggestion(skill: Skill): void {
+        this.inputValue = `${skill.trigger} `;
+        this.slashSuggestions = [];
+        this.suggestionIndex = 0;
+        this.update();
+        setTimeout(() => {
+            const ta = document.getElementById('arschat-chat-input') as HTMLTextAreaElement | null;
+            if (ta) {
+                ta.focus();
+                ta.setSelectionRange(ta.value.length, ta.value.length);
+            }
+        }, 0);
+    }
+
+    protected onInputKeyDown(e: React.KeyboardEvent): void {
+        if (this.slashSuggestions.length > 0) {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                this.suggestionIndex = Math.min(this.suggestionIndex + 1, this.slashSuggestions.length - 1);
+                this.update();
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                this.suggestionIndex = Math.max(this.suggestionIndex - 1, 0);
+                this.update();
+                return;
+            }
+            if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+                e.preventDefault();
+                this.selectSuggestion(this.slashSuggestions[this.suggestionIndex]);
+                return;
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                this.slashSuggestions = [];
+                this.update();
+                return;
+            }
+        }
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            this.send();
+        }
+    }
+
     // ---------------------------------------------------------------- render
 
     render(): React.ReactElement {
@@ -441,6 +556,18 @@ export class ArschatChatWidget extends ReactWidget {
                         >
                             + 新規
                         </button>
+                        <select
+                            id='arschat-persona-select'
+                            className='theia-select arschat-persona-select'
+                            title='ペルソナ'
+                            value={this.activePersonaId}
+                            onChange={e => this.onPersonaChange(e.target.value)}
+                        >
+                            {this.personas.length === 0 && <option value=''>(no personas)</option>}
+                            {this.personas.map(p => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                        </select>
                         <select
                             id='arschat-provider-select'
                             className='theia-select arschat-provider-select'
@@ -491,16 +618,34 @@ export class ArschatChatWidget extends ReactWidget {
                     </div>
                 )}
                 <div className='arschat-chat-input-bar'>
+                    {this.slashSuggestions.length > 0 && (
+                        <div id='arschat-slash-popup' className='arschat-slash-popup'>
+                            {this.slashSuggestions.map((skill, idx) => (
+                                <button
+                                    key={skill.id}
+                                    type='button'
+                                    className={`arschat-slash-item ${idx === this.suggestionIndex ? 'active' : ''}`}
+                                    onMouseDown={e => { e.preventDefault(); this.selectSuggestion(skill); }}
+                                >
+                                    <span className='arschat-slash-trigger'>{skill.trigger}</span>
+                                    <span className='arschat-slash-meta'>
+                                        <span className='arschat-slash-name'>{skill.name}</span>
+                                        <span className='arschat-slash-desc'>{skill.description}</span>
+                                    </span>
+                                </button>
+                            ))}
+                        </div>
+                    )}
                     <textarea
                         id='arschat-chat-input'
                         className='theia-input arschat-chat-input'
-                        placeholder='メッセージを入力... (画像は貼り付け/ドロップ)'
+                        placeholder='メッセージを入力... (/ でスキル、画像は貼り付け/ドロップ)'
                         value={this.inputValue}
                         disabled={this.sending}
                         rows={1}
-                        onChange={e => { this.inputValue = e.target.value; this.update(); }}
+                        onChange={e => this.onInputChange(e.target.value)}
                         onPaste={e => this.handlePaste(e)}
-                        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.send(); } }}
+                        onKeyDown={e => this.onInputKeyDown(e)}
                     />
                     {this.sending ? (
                         <button

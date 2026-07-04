@@ -35,9 +35,14 @@
 }
 
 .arschat-provider-select,
-.arschat-model-select {
+.arschat-model-select,
+.arschat-persona-select {
     font-size: 12px;
     max-width: 220px;
+}
+
+.arschat-persona-select {
+    font-weight: 600;
 }
 
 .arschat-chat-cursor {
@@ -82,11 +87,78 @@
 }
 
 .arschat-chat-input-bar {
+    position: relative;
     flex: 0 0 auto;
     display: flex;
     gap: 8px;
     padding: 12px 16px;
     border-top: 1px solid var(--theia-editorGroup-border, #444);
+}
+
+/* ---- slash-command skill completion popup (M4) ---- */
+.arschat-slash-popup {
+    position: absolute;
+    bottom: 100%;
+    left: 16px;
+    right: 16px;
+    margin-bottom: 6px;
+    background: var(--theia-editorWidget-background, #252526);
+    border: 1px solid var(--theia-editorWidget-border, #454545);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    overflow: hidden;
+    z-index: 50;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.arschat-slash-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+    color: var(--theia-foreground);
+}
+
+.arschat-slash-item:hover,
+.arschat-slash-item.active {
+    background: var(--theia-list-activeSelectionBackground, rgba(99, 102, 241, 0.25));
+    color: var(--theia-list-activeSelectionForeground, inherit);
+}
+
+.arschat-slash-trigger {
+    flex: 0 0 auto;
+    font-family: var(--theia-code-font-family, monospace);
+    font-size: 12px;
+    color: var(--theia-textLink-foreground, #38bdf8);
+    margin-top: 1px;
+}
+
+.arschat-slash-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.arschat-slash-name {
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.arschat-slash-desc {
+    font-size: 11px;
+    opacity: 0.7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .arschat-chat-input {

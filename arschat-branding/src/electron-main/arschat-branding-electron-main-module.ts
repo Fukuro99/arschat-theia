@@ -26,6 +26,7 @@ import { ArschatPoc3AutotestContribution } from './arschat-poc3-autotest-contrib
 import { ArschatPoc4AutotestContribution } from './arschat-poc4-autotest-contribution';
 import { ArschatM2AutotestContribution } from './arschat-m2-autotest-contribution';
 import { ArschatM3AutotestContribution } from './arschat-m3-autotest-contribution';
+import { ArschatM4AutotestContribution } from './arschat-m4-autotest-contribution';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(ArschatElectronMainApplication).toSelf().inSingletonScope();
@@ -51,4 +52,7 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
     bind(ArschatM3AutotestContribution).toSelf().inSingletonScope();
     bind(ElectronMainApplicationContribution).toService(ArschatM3AutotestContribution);
+
+    bind(ArschatM4AutotestContribution).toSelf().inSingletonScope();
+    bind(ElectronMainApplicationContribution).toService(ArschatM4AutotestContribution);
 });

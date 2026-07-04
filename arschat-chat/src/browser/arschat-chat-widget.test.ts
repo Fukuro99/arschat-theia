@@ -4,6 +4,8 @@ import { ArschatChatWidget } from './arschat-chat-widget';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
 import { ProviderSwitchService } from 'arschat-providers/lib/browser/provider-switch-service';
+import { PersonaService } from 'arschat-agents/lib/browser/persona-service';
+import { SkillService } from 'arschat-agents/lib/browser/skill-service';
 import { ArschatChatUiService } from './arschat-chat-ui-service';
 import { render } from '@testing-library/react';
 import { act } from 'react';
@@ -26,6 +28,23 @@ describe('ArschatChatWidget', () => {
             } as unknown as ProviderSwitchService);
             bind(ChatService).toConstantValue({} as ChatService);
             bind(ChatAgentService).toConstantValue({} as ChatAgentService);
+            bind(PersonaService).toConstantValue({
+                ready: async () => undefined,
+                getPersonas: () => [
+                    { id: 'default', name: 'ArsChat', systemPrompt: 'sp', avatarPath: null },
+                    { id: 'coder', name: 'Coder', systemPrompt: 'sp2', avatarPath: null }
+                ],
+                getActivePersonaId: () => 'default',
+                setActivePersona: async () => undefined,
+                onDidChange: () => ({ dispose(): void { /* noop */ } })
+            } as unknown as PersonaService);
+            bind(SkillService).toConstantValue({
+                ready: async () => undefined,
+                getSkills: () => [],
+                filterByQuery: () => [],
+                expandInput: () => undefined,
+                onDidChange: () => ({ dispose(): void { /* noop */ } })
+            } as unknown as SkillService);
             bind(ArschatChatUiService).toConstantValue({
                 onLoadSessionRequested: () => ({ dispose(): void { /* noop */ } }),
                 onNewSessionRequested: () => ({ dispose(): void { /* noop */ } }),
@@ -54,6 +73,17 @@ describe('ArschatChatWidget', () => {
         const element = render(widget.render());
         expect(element.queryByText('Anthropic')).toBeTruthy();
         expect(element.queryByText('LM Studio')).toBeTruthy();
+    });
+
+    it('should show persona options in the header (M4)', () => {
+        const element = render(widget.render());
+        // "Coder" only exists as a persona <option>; "ArsChat" also appears as the
+        // header title, so assert the persona <select> contains both option labels.
+        const select = element.container.querySelector('#arschat-persona-select');
+        expect(select).toBeTruthy();
+        const options = Array.from(select!.querySelectorAll('option')).map(o => o.textContent);
+        expect(options).toContain('ArsChat');
+        expect(options).toContain('Coder');
     });
 
 });

@@ -537,3 +537,53 @@ Theia AI 1.71.2 の `ChatRequest` には画像フィールドが無い(`text`/`v
 3. **`ChatRequest` に画像フィールドが無い**: 上の「画像添付」節のとおり variable 経由。最初 `ChatRequest` に画像を直接載せようとして詰まり、`image-context-variable.d.ts` と `chat-agents.js` を読んで variable→ImageMessage 経路を特定した。
 4. **frontend console.log は stdout に出ない**: Electron の renderer console は devtools 行きで、この検証の stdout ログには乗らない(PoC-3 ハマった点4の派生)。M3 autotest は `ILogger.info`(backend へ RPC)併用にしたが、そもそも frontend onStart 未到達で無効化。将来シェル描画が安定したら ILogger 経路で結果が stdout に出る想定。
 5. **履歴パネルの初回 refresh をレイアウト初期化パスから外す**: `getPersistedSessions()` はストレージ初期化(disk I/O)を誘発しうる。View 生成/`initializeLayout` の同期パスで走らせるとシェル復元をブロックしかねないため、`setTimeout(0)` で後追い実行にした(防御的措置)。
+
+## Phase 1 M4 実装メモ (ペルソナ + スキル)
+
+作成: 2026-07-04 / 対象: PHASE1_DESIGN.md §6・§9 M4。M2 の暫定 ArsChat agent(固定システムプロンプト)を、**アクティブペルソナの合成プロンプトを反映する本実装**に発展させ、スキル(Markdown+frontmatter)のロード・スラッシュ補完・展開、ペルソナ管理 View を追加した。**Theia本体(node_modules配下)は一切改変していない。全パッケージ 1.71.2 ピン留め維持。旧 ArsChat は参照のみ**(`src/shared/types.ts` の `Persona` 型と `getEffectiveSystemPrompt`、`src/main/skill-manager.ts`、`src/renderer/components/ChatWindow.tsx` のスラッシュ補完UX)。
+
+### agent 登録方式の選択と根拠(§6 が委ねた点)
+
+§6 は「ペルソナ=動的ChatAgent」に2案を提示: **(a)** 単一の ArsChat agent がアクティブペルソナのプロンプトを差し替える / **(b)** ペルソナ毎に個別 agent を `registerChatAgent`/`unregisterChatAgent`。**(a) を選択。** 根拠:
+
+1. **M2 の配線を無改変で維持できる**: ProviderSwitchService は「この1つの agent」の `languageModelRequirements` を駆動し、チャット Widget はこの agent id(`'ArsChat'`)を pinnedAgent としてセッションに渡す。agent id を1つに固定すればセッションルーティング・provider 切替・pinnedAgent の全配線がそのまま生きる。
+2. **ペルソナは頻繁に編集される(CRUD)**: 作成/編集/削除の度に agent を register/unregister するのは可動部と失敗面(dangling registration、stale pinned agent)が増えるだけで、§6 自身が「UX上の差異なし」と述べるとおりユーザー可視の利得がゼロ。
+3. **システムプロンプトは送信時に動的供給**: `AbstractChatAgent.getSystemMessageDescription()` はリクエスト毎に呼ばれるので、そこで PersonaService から**アクティブペルソナの合成プロンプトを送信時に読む**。ペルソナ切替/編集が次の送信のシステムプロンプトに再起動なし・再登録なしで反映される。
+
+§11 が確認した動的登録 API(`registerChatAgent`)は起動時の1回登録で引き続き使用(`arschat-agents-frontend-module.ts`)。
+
+### 実装構成(arschat-agents)
+
+- `common/persona.ts`: **Theia 非依存**の `Persona` 型 + `composeSystemPrompt()`(旧 `getEffectiveSystemPrompt` のペルソナ分岐を移植: 名前プレフィックス「あなたの名前は「<name>」です。」+ ペルソナ system prompt + スキルカタログ節 + `現在日時:` タグ)+ `DEFAULT_PERSONA`。旧関数の file-browser/open-files/code-editor/memory 節は後続 Phase(tools=M5, memory=Phase 2)のため意図的に持ち込まない。
+- `common/skill.ts` + `common/skill-parser.ts`: `Skill` 型 + **gray-matter** による frontmatter パーサ(旧 skill-manager の自前 YAML パーサは移植しない、§6 指示どおり)。`gray-matter` を依存追加(workspace root に `yarn add`)。CJS のため `import matter = require('gray-matter')`(esModuleInterop 無し環境、M3 と同じ正規化)。
+- `browser/persona-service.ts`: ペルソナ CRUD + 永続化 + アクティブ管理 + 合成プロンプト供給。永続先は `${configDir}/arschat/personas.json`(`{ personas, activePersonaId }`)。**frontend の `FileService`(RPC で backend fs)+ `EnvVariablesServer.getConfigDirUri()`** で読み書き — これにより arschat-agents は frontend のみで完結し、独自 backend サービス不要(configDir は SessionStore と同じ global スコープ=ワークスペース非依存)。初回起動で DEFAULT_PERSONA をシード。
+- `browser/skill-service.ts`: `${configDir}/arschat/skills/*.md` を `FileService` でロード、初回に `/summarize`・`/translate` をシード。スラッシュ展開 `expandInput()`(`/trigger 追加文` → skill 本文 + `\n\n---\n\n追加文`、旧 ChatWindow の展開ロジック移植)。手動 `reload()` を公開しコマンド `arschat-agents:skills:reload` にバインド(ファイル監視ではなくコマンド方式を実装コストで選択。監視は `FileService.watch` で将来追加可能)。
+- `browser/arschat-chat-agent.ts`: `getSystemMessageDescription()` を `personaService.getActiveEffectiveSystemPrompt()` にした(M2 の固定プロンプトから発展)。モデル解決の M2 配線(ProviderSwitchService)は不変。
+- `browser/persona-management-widget.tsx` + `persona-management-contribution.ts` + `style/index.css`: 左サイドバーのペルソナ管理 View(一覧・「使用中」バッジ・クリックで切替・インライン作成/編集フォーム・削除、最後の1つは削除不可)。§6 が警告する「旧 Settings.tsx(2503行)の巨大単一画面」を踏まないよう **ペルソナだけを扱う小さな専用 View** にした。
+
+### 実装構成(arschat-chat)
+
+- `arschat-chat-widget.tsx`: ヘッダーに**ペルソナドロップダウン**を追加(PersonaService と双方向、`onDidChange` で管理パネルと同期)。入力欄に**スラッシュ補完ポップアップ**(`/` で SkillService の候補、↑↓ で選択・Tab/Enter で確定・Esc で閉じる、旧 ChatWindow の UX 踏襲)。送信時に `SkillService.expandInput()` で `/trigger` を本文展開し、`ChatRequest.text`=展開後本文・`ChatRequest.displayText`=元の `/trigger` 行(Theia の displayText がちょうど旧 app の displayContent に対応)。
+- arschat-chat が arschat-agents を workspace 依存(agents は chat に依存しないので循環なし。lerna トポロジ順: providers→agents→chat)。
+
+### 検証結果(ARSCHAT_M4_AUTOTEST=1、実機ログ)
+
+M3 のモック LanguageModel 方式を流用し、**モックが受け取った `system` メッセージ(`actor:'system'` の TextMessage)をログ出力**して合成プロンプトを検査可能にした(`arschat-m4-autotest-contribution.ts`)。実機 Electron で全項目 PASS:
+
+- **(a) ペルソナ切替**: 2ペルソナ作成(アリス=`ALICE_MARKER`/ボブ=`BOB_MARKER`)→切替→送信で、モックが受け取る system プロンプトが「あなたの名前は「アリス」です。…ALICE_MARKER…」↔「…「ボブ」です。…BOB_MARKER…」に切り替わる(`aliceSystemHasMarker=true bobSystemHasMarker=true promptsDiffer=true`)→ **PASS**。
+- **(b) スキル一覧ロード**: `count=2 triggers=[/summarize, /translate]` → **PASS**。
+- **(c) /スキル展開送信**: `expandInput('/summarize これを要約して')` が本文(要約スキル)を展開、実送信でモックが受け取る user text に本文+追加文が含まれる(`sentBodyToModel=true sentTrailingText=true`)→ **PASS**。
+- **(d) 永続化+リロード**: `personas.json` に作成ペルソナが残り、`reload()` で skills/*.md を再読込できる → **PASS**。ディスク上の `~/.theia/arschat/personas.json`(JSON)と `~/.theia/arschat/skills/{summarize,translate}.md`(frontmatter 付き)を直接確認。
+- **スラッシュ補完ポップアップ**: autotest が実 textarea に `/` を native value setter + input イベントで打ち込み、`#arschat-slash-popup` に2項目レンダリング(`rendered=true itemCount=2`)→ **PASS**。
+- **スクリーンショット**: 実 Electron シェルが**この run では描画された**(M3 の描画不安定が解消)ため実機キャプチャ: `poc-artifacts/m4-persona-switch.png`(101KB、ペルソナ管理パネルにArsChat/アリス/ボブ・ヘッダーにペルソナ「ボブ」ドロップダウン)/ `m4-skill-complete.png`(110KB、入力欄`/`+ `/summarize`・`/translate` の補完ポップアップ表示)。
+- **jest**: arschat-agents **11/11**(persona 合成6、skill パーサ5)、arschat-chat **11/11**(既存9 + ペルソナ options 表示1、+ 既存)。
+- **M3 回帰(ARSCHAT_M3_AUTOTEST=1)**: streaming round-trip / persistence / restore すべて **PASS 維持**。M4 が M3 を壊していない。
+- **ビルド**: 全5パッケージ `npm run prepare` tsc エラー0、`npm run build:electron` webpack `compiled successfully`。gray-matter は frontend バンドル(`vendors-node_modules_gray-matter_index_js.js`)に問題なく取り込まれた(node builtin 未解決の警告なし)。
+
+### ハマった点
+
+1. **`activate(id)` が `Widget.activate()` と衝突**: ペルソナ管理 Widget に `activate(id: string)` メソッドを置いたら基底 `ReactWidget`(→`Widget`)の `activate(): void` とシグネチャ非互換で TS2416/TS2344/TS2345。`activatePersona(id)` に改名して解消。
+2. **`FileStat` に `.type` は無い**: skills ディレクトリの子を判定するのに `child.type === FileType.File` と書いたら TS2339。`FileStat` は `isFile`/`isDirectory` の boolean を持つので `child.isFile` に変更(`FileType` import も削除)。
+3. **ペルソナ/スキルの永続化に独自 backend を作らない**: 最初 backend サービス経由の fs アクセスを検討したが、frontend の `FileService`(RPC)+ `EnvVariablesServer.getConfigDirUri()` で configDir 配下を直接読み書きでき、arschat-agents を frontend のみに保てた(M3 の SessionStore と同じ global スコープに揃う)。
+4. **スラッシュ補完ポップアップのスクショが撮れない(transient UI)**: ポップアップは入力中だけ表示されるため、電メインの単純キャプチャでは persona パネルしか写らなかった。frontend autotest から実 textarea に native value setter + `input` イベントで `/` を注入して React に state 更新させ、ポップアップを描画させた状態で撮る方式にした(t+35s、persona-switch 撮影 t+30s の後・skill-complete 撮影 t+42s の前に発火)。
+5. **検証 run でペルソナが累積する**: personas.json は永続化されるので autotest を複数回走らせるとアリス/ボブが `アリス-1`/`ボブ-1` と重複 ID 回避されつつ溜まる(=永続化が効いている証拠でもある)。検証後 `~/.theia/arschat/personas.json` を削除して次回起動で DEFAULT_PERSONA を再シードするクリーン状態に戻した(skills/*.md はシード済みサンプルなので残置)。
