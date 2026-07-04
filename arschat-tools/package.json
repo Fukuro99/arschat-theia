@@ -4,7 +4,7 @@
     "theia-extension"
   ],
   "version": "0.0.1",
-  "description": "ArsChat AI tools (run_command / web_search / fetch_page / file ops) + approval flow (skeleton; implemented in M5)",
+  "description": "ArsChat AI tools. M5 e-2: read_file / write_file / edit_file registered as @theia/ai-core ToolProviders and wired into the ArsChat ChatAgent. run_command / web_search / fetch_page and the approval flow (PHASE1_DESIGN.md §7) land later.",
   "author": "Fukuro99",
   "license": "MIT",
   "files": [
@@ -12,17 +12,27 @@
     "src"
   ],
   "dependencies": {
-    "@theia/core": "1.71.2"
+    "@theia/ai-chat": "1.71.2",
+    "@theia/ai-core": "1.71.2",
+    "@theia/core": "1.71.2",
+    "@theia/filesystem": "1.71.2",
+    "@theia/workspace": "1.71.2",
+    "arschat-agents": "0.0.1"
   },
   "devDependencies": {
     "rimraf": "^5.0.0",
-    "typescript": "~5.4.5"
+    "typescript": "~5.4.5",
+    "@types/jest": "^29.5.0",
+    "jest": "^29.5.0",
+    "ts-node": "^10.9.1",
+    "ts-jest": "^29.1.0"
   },
   "scripts": {
     "prepare": "npm run clean && npm run build",
     "clean": "rimraf lib",
     "build": "tsc",
-    "watch": "tsc -w"
+    "watch": "tsc -w",
+    "test": "jest --config configs/jest.config.ts"
   },
   "theiaExtensions": [
     {

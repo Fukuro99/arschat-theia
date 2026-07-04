@@ -31,7 +31,7 @@
 
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { AbstractStreamParsingChatAgent, ChatAgentLocation, SystemMessageDescription } from '@theia/ai-chat/lib/common/chat-agents';
-import { LanguageModelRequirement } from '@theia/ai-core';
+import { LanguageModelRequirement, ToolRequest } from '@theia/ai-core';
 import { ARSCHAT_CHAT_AGENT_ID, ARSCHAT_CHAT_PURPOSE } from 'arschat-providers/lib/browser/provider-switch-service';
 import { PersonaService } from './persona-service';
 
@@ -57,6 +57,17 @@ export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
      * path) is what selects the model.
      */
     languageModelRequirements: LanguageModelRequirement[] = [{ purpose: ARSCHAT_CHAT_PURPOSE }];
+
+    /**
+     * Expose the base class' `additionalToolRequests` so arschat-tools (M5 e-2)
+     * can attach the file tools (read/write/edit) to this agent's requests. The
+     * base `invoke()` spreads `additionalToolRequests` into the tools handed to
+     * the language model (chat-agents.js), so setting them here makes the tools
+     * resolvable on every ArsChat request without touching @mention parsing.
+     */
+    setToolRequests(tools: ToolRequest[]): void {
+        this.additionalToolRequests = tools;
+    }
 
     /**
      * Called by AbstractChatAgent per request. Reads the ACTIVE persona's composed

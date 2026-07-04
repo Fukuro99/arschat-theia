@@ -1,14 +1,92 @@
 // *****************************************************************************
-// ArsChat tools extension - frontend DI module (skeleton).
+// ArsChat tools extension - frontend DI module (PHASE1_DESIGN.md §7, M5 e-2).
 //
-// M1 (package re-org): empty, buildable skeleton. The AI tools (run_command /
-// web_search / fetch_page / file ops) and the approval flow (PHASE1_DESIGN.md
-// §7) land in M5. Registered now so the package is part of the Theia build
-// graph from M1.
+// Wires the first three AI tools (read_file / write_file / edit_file) as
+// @theia/ai-core ToolProviders and attaches them to the active ArsChat
+// ChatAgent so the model can actually call them from a chat request.
+//
+// ---- Wiring, layer by layer -------------------------------------------------
+//   1. ArschatFileToolsService  (browser/): the single FileService/Workspace
+//      glue that performs the reads/writes. Bound to self, singleton.
+//   2. {Read,Write,Edit}FileToolProvider (browser/): each implements
+//      @theia/ai-core's ToolProvider (getTool(): ToolRequest) and is registered
+//      via bindToolProvider(). @theia/ai-core's ToolInvocationRegistryImpl.init()
+//      (@postConstruct) collects every bound ToolProvider and registers its
+//      ToolRequest - so bindToolProvider() alone makes the tools appear in the
+//      ToolInvocationRegistry.
+//   3. ArschatToolsRegistrationContribution (FrontendApplicationContribution):
+//      on startup, resolves exactly our three tools from the
+//      ToolInvocationRegistry by id and hands them to the ArsChat agent via
+//      agent.setToolRequests(). The base AbstractChatAgent spreads
+//      `additionalToolRequests` into the tools passed to the language model on
+//      every request (chat-agents.js), so the model can call read/write/edit on
+//      any ArsChat send - no @tool mention required.
+//
+// ---- Approval (INTERIM, e-3 will replace this) ------------------------------
+//   Theia 1.71.2 has a ToolConfirmationMode / confirmation manager
+//   (@theia/ai-chat FrontendChatToolRequestService + chat-tool-preference-
+//   bindings). Its DEFAULT mode for a normal tool (no `confirmAlwaysAllow` flag)
+//   is ALWAYS_ALLOW, i.e. tools run WITHOUT a confirmation prompt. Our three
+//   tools deliberately omit `confirmAlwaysAllow` for e-2 so the read/write/edit
+//   path can be exercised end-to-end right now. write_file / edit_file mutating
+//   the disk unconfirmed is an e-2 stopgap ONLY; the approval UI + confirmation
+//   policy (marking the write tools confirm-required, wiring the modal) is e-3.
+//   TODO(e-3): give write_file / edit_file `confirmAlwaysAllow: true` (or a
+//   dedicated ArsChat approval flow) and stop relying on the ALWAYS_ALLOW
+//   default. See BUILD_NOTES.md "Phase 1 M5 (e-2)".
 // *****************************************************************************
 
-import { ContainerModule } from '@theia/core/shared/inversify';
+import { ContainerModule, interfaces, injectable, inject } from '@theia/core/shared/inversify';
+import { ILogger } from '@theia/core';
+import { FrontendApplicationContribution } from '@theia/core/lib/browser';
+import { ToolInvocationRegistry, bindToolProvider } from '@theia/ai-core/lib/common/tool-invocation-registry';
+import { ArschatChatAgent } from 'arschat-agents/lib/browser/arschat-chat-agent';
+import { ArschatFileToolsService } from './arschat-file-tools-service';
+import { ReadFileToolProvider } from './read-file-tool-provider';
+import { WriteFileToolProvider } from './write-file-tool-provider';
+import { EditFileToolProvider } from './edit-file-tool-provider';
+import { ARSCHAT_FILE_TOOL_IDS } from '../common/tool-ids';
 
-export default new ContainerModule(() => {
-    // Intentionally empty. Bindings added in M5 (PHASE1_DESIGN.md §7).
+@injectable()
+export class ArschatToolsRegistrationContribution implements FrontendApplicationContribution {
+
+    @inject(ToolInvocationRegistry)
+    protected readonly toolRegistry!: ToolInvocationRegistry;
+
+    @inject(ArschatChatAgent)
+    protected readonly agent!: ArschatChatAgent;
+
+    @inject(ILogger)
+    protected readonly logger!: ILogger;
+
+    onStart(): void {
+        // The three ToolProviders were already collected into the registry by
+        // ToolInvocationRegistryImpl.init(); resolve exactly ours by id.
+        const tools = this.toolRegistry.getFunctions(...ARSCHAT_FILE_TOOL_IDS);
+        this.agent.setToolRequests(tools);
+        const resolved = tools.map(t => t.id).join(', ') || '<none>';
+        this.logger.info(`[arschat-tools] attached ${tools.length} file tool(s) to ArsChat agent: ${resolved}`);
+        if (tools.length !== ARSCHAT_FILE_TOOL_IDS.length) {
+            this.logger.warn(`[arschat-tools] expected ${ARSCHAT_FILE_TOOL_IDS.length} tools (${ARSCHAT_FILE_TOOL_IDS.join(', ')}) `
+                + `but the registry only resolved ${tools.length}. Check ToolProvider bindings.`);
+        }
+    }
+}
+
+export function bindArschatTools(bind: interfaces.Bind): void {
+    bind(ArschatFileToolsService).toSelf().inSingletonScope();
+
+    // Register the three ToolProviders (each bound to self + as a ToolProvider
+    // contribution, per bindToolProvider's contract).
+    bindToolProvider(ReadFileToolProvider, bind);
+    bindToolProvider(WriteFileToolProvider, bind);
+    bindToolProvider(EditFileToolProvider, bind);
+
+    // Attach the resolved tools to the ArsChat agent on startup.
+    bind(ArschatToolsRegistrationContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatToolsRegistrationContribution);
+}
+
+export default new ContainerModule(bind => {
+    bindArschatTools(bind);
 });

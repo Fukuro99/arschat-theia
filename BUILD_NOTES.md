@@ -587,3 +587,47 @@ M3 のモック LanguageModel 方式を流用し、**モックが受け取った
 3. **ペルソナ/スキルの永続化に独自 backend を作らない**: 最初 backend サービス経由の fs アクセスを検討したが、frontend の `FileService`(RPC)+ `EnvVariablesServer.getConfigDirUri()` で configDir 配下を直接読み書きでき、arschat-agents を frontend のみに保てた(M3 の SessionStore と同じ global スコープに揃う)。
 4. **スラッシュ補完ポップアップのスクショが撮れない(transient UI)**: ポップアップは入力中だけ表示されるため、電メインの単純キャプチャでは persona パネルしか写らなかった。frontend autotest から実 textarea に native value setter + `input` イベントで `/` を注入して React に state 更新させ、ポップアップを描画させた状態で撮る方式にした(t+35s、persona-switch 撮影 t+30s の後・skill-complete 撮影 t+42s の前に発火)。
 5. **検証 run でペルソナが累積する**: personas.json は永続化されるので autotest を複数回走らせるとアリス/ボブが `アリス-1`/`ボブ-1` と重複 ID 回避されつつ溜まる(=永続化が効いている証拠でもある)。検証後 `~/.theia/arschat/personas.json` を削除して次回起動で DEFAULT_PERSONA を再シードするクリーン状態に戻した(skills/*.md はシード済みサンプルなので残置)。
+
+## Phase 1 M5 実装メモ (e-2: read/write/edit_file ツール3種を ToolProvider として配線)
+
+作成: 2026-07-05 / 対象: PHASE1_DESIGN.md §7・§9 M5(e-2)。空スケルトンだった arschat-tools を実体化し、`read_file` / `write_file` / `edit_file` の3ツールを **Theia AI の `ToolProvider`(`@theia/ai-core`)として登録**、アクティブな ArsChat ChatAgent(arschat-agents)のリクエストで**ツールとして解決される最小経路**を通した。**承認フロー(UI・write系のconfirm化)は次タスク e-3 の範囲**で、e-2 では Theia 既定の無確認実行に乗る暫定。**Theia本体(node_modules配下)は一切改変していない。全パッケージ 1.71.2 ピン留め維持。**
+
+### ToolProvider 配線(どの層に何を bind したか)
+
+3層構成。node_modules 実測に基づく配線:
+
+1. **`ArschatFileToolsService`(arschat-tools/browser、singleton)**: 実際に fs を触る唯一の場所。Theia の frontend `FileService`(RPC→backend fs)+ `WorkspaceService` + `EnvVariablesServer` を使い、Node `fs` 直叩きを避けた(URI/権限解決が Theia のルールに乗る。M3 SessionStore・M4 PersonaService と同じ FileService パターン)。`path` 引数は絶対パス/URI ならそのまま、相対なら**最初のワークスペースルート**(無ければ configDir)基準で解決。
+2. **3つの ToolProvider(`ReadFileToolProvider`/`WriteFileToolProvider`/`EditFileToolProvider`)**: 各々 `@theia/ai-core/lib/common/tool-invocation-registry` の `ToolProvider` インターフェース(`getTool(): ToolRequest`)を実装する薄い `@injectable` ラッパー。`getTool()` は pure なファクトリ(`common/file-tool-requests.ts` の `createReadFileTool()` 等)に `ArschatFileToolsService` を渡すだけ。**`bindToolProvider(Provider, bind)`**(`@theia/ai-core`)で登録。`ToolInvocationRegistryImpl.init()`(`@postConstruct`)が **bind 済み全 ToolProvider を集めて `registerTool(provider.getTool())`** するので、`bindToolProvider` だけで `ToolInvocationRegistry` にツールが載る(追加の手続き不要。node_modules 実測)。
+3. **`ArschatToolsRegistrationContribution`(`FrontendApplicationContribution`)**: 起動時(`onStart`)に `ToolInvocationRegistry.getFunctions(read_file, write_file, edit_file)` で**自分の3ツールだけ**を id で解決し、`ArschatChatAgent.setToolRequests(tools)` でエージェントに渡す。base `AbstractChatAgent.invoke()` が `additionalToolRequests` をリクエストのツールへ spread する(`chat-agents.js` L141 実測)ため、**@mention なしで毎 ArsChat 送信にツールが載る**。
+
+エージェント側の受け口は arschat-agents の `ArschatChatAgent` に **`setToolRequests(tools)` 公開メソッド**を追加(base の `additionalToolRequests` は `protected` なので外部から書けない)。M2/M4 のモデル解決・ペルソナ配線は無改変。
+
+**依存/循環**: arschat-tools → arschat-agents(`ArschatChatAgent` を import)を package.json に宣言。agents は tools に依存しないので循環なし。lerna トポロジ順は providers→agents→tools。electron-app / browser-app には既に arschat-tools が依存登録済み(M1 スケルトン時点)なので、frontend モジュールは自動でビルドグラフ・生成 frontend に載る(`electron-app/src-gen/frontend/index.js` に `import('arschat-tools/lib/browser/arschat-tools-frontend-module')` を確認)。
+
+### 承認まわりの暫定措置(e-3 への引き継ぎ、実測込み)
+
+**結論: e-2 では preference 変更も `confirmAlwaysAllow` 付与もせず、Theia 既定の無確認実行に乗せた。** 根拠(node_modules 実測):
+
+- 確認モードの実体は `@theia/ai-chat` の **`FrontendChatToolRequestService.toChatToolRequest()`**(`lib/browser/chat-tool-request-service.js`)がツール handler をラップして `ToolConfirmationMode`(`ALWAYS_ALLOW`/`CONFIRM`/`DISABLED`)で分岐する。
+- 既定モードは `chat-tool-preference-bindings.js` の `getConfirmationMode()`: **通常ツール(`confirmAlwaysAllow` 無し)は既定 `ALWAYS_ALLOW`**、`confirmAlwaysAllow` フラグ付きツールのみ既定 `CONFIRM`。つまり**preference を触らなくても、フラグを付けなければ無確認で走る**。
+- したがって read/write/edit の3ツールは意図的に `confirmAlwaysAllow` を**付けていない**。read_file は read-only なので恒久的にそれで良い。**write_file / edit_file が無確認で disk を書き換えるのは e-2 までの暫定**(各 provider と `file-tool-requests.ts` に `TODO(e-3)` コメントを明記)。
+- 依頼文が案として挙げた「preference `ai-features.chat.toolConfirmation` を ALWAYS_ALLOW にする暫定措置」は**不要だった**(既定が既に ALWAYS_ALLOW のため)。electron-app には PoC-3 由来の `security.workspace.trust.enabled: false` があり、確認モードを読む `trustAwareReader` もブロックしない。
+- **e-3 でやること**: write_file / edit_file に `confirmAlwaysAllow: true`(または ArsChat 独自の承認フロー)を与えて既定 ALWAYS_ALLOW から外し、`FrontendChatToolRequestService` が `request.response.fireInteractionNeeded()` で発火する確認 UI(`@theia/ai-chat-ui` の `tool-confirmation` / `toolcall-part-renderer`)を自前 Widget 側で受けて承認ダイアログを出す。`ToolRequest.checkAutoAction`(allow/deny の自動判定フック)や `confirmationTimeout` preference も e-3 の材料。
+
+### edit_file の設計(pure ロジック分離)
+
+文字列置換の中核は Theia 非依存の pure 関数 `common/edit-file.ts` の `applyEdit(content, {oldString, newString, replaceAll})` に切り出した(M4 の skill-parser と同じ「ロジックは common/・DI は browser/」分割)。契約: `oldString` は存在必須、`replaceAll=false`(既定)なら**一意でなければ曖昧として拒否**(先頭マッチを黙って書き換えない)、`newString` は `oldString` と異なること。これで edit の挙動を DI/fs 抜きに unit テストできる。
+
+### 検証結果
+
+- **jest**: **arschat-tools 12/12 PASS**(`edit-file.test.ts` 8: applyEdit の一意/replaceAll/不在/no-op/空/複数行保持/countOccurrences、`file-tool-requests.test.ts` 4: 各ツールの ToolRequest shape=id/providerName/required、handler がフェイク backend 経由で内容返却・作成/上書き・in-place 置換・各種エラー整形、read_file が `confirmAlwaysAllow` 無し=既定 ALWAYS_ALLOW を確認)。**回帰なし: arschat-agents 11/11・arschat-chat 11/11**。
+- **ビルド**: 全5パッケージ `yarn prepare`(lerna `tsc`)エラー0。**`yarn build:electron`(canonical 目標)webpack `compiled successfully`**。生成 frontend に arschat-tools モジュール登録を確認。
+- **`yarn build:browser` は既知の browser-app 制約で FAIL**: `@vscode/windows-ca-certs` の webpack 解決エラー(PoC-3 ハマった点1と同一)。この ignore 修正は `electron-app/webpack.config.js` にのみ入っており(`nodeConfig.ignoredResources.add('@vscode/windows-ca-certs')`)、`browser-app/webpack.config.js` には無い。**browser-app は BUILD_NOTES 足場節どおり「生成物の残置・このワークフローではビルド/起動しない」対象で、全マイルストーンの canonical ビルドは build:electron。M5 の変更に起因する失敗ではない(既存の browser-app 側の未対応)。** e-2 のスコープ外だが、将来 browser を建てる必要が出たら同じ1行を browser-app 側に足せば解消する見込み。
+- **ライブ検証(実際に AI に read_file を頼んでファイル内容が回答に反映される / write・edit が実ファイルを変更する)**: **API キー不在の検証サンドボックス制約で未実施**(M2〜M4 と同じ。ArsChat agent はツール対応の実プロバイダ〔Anthropic/OpenAI〕が ready でないとツールコールを発火できない)。配線は「ToolProvider 登録 → registry 解決 → agent の additionalToolRequests に載る」まで静的に確立済みで、ビルド生成物にも反映されている。実キーでの往復は e-3 の承認 UI 実装とあわせて実機確認する想定。
+
+### ハマった点
+
+1. **provider の jest テストが jsdom を要求してしまう**: 最初 browser の ToolProvider クラスを直接テストしたが、`ArschatFileToolsService` の import が `@theia/filesystem/lib/browser/file-service` → `@lumino/widgets` を引き、node 環境で `document is not defined` になった(arschat-chat が jsdom+setup で回避しているのと同じ壁)。jsdom スタックを tools に持ち込む代わりに、**ToolRequest 生成を pure ファクトリ(`common/file-tool-requests.ts`)に切り出し**、browser provider は薄いラッパーにして、テストは common 側(node 環境)でファクトリ+フェイク backend を叩く形にした。agents の common/ 分割と揃い、tools を素の node jest で回せる。
+2. **`ToolRequest` 型の import 元**: `common/file-tool-requests.ts` で `@theia/ai-core` バレルから値 import すると browser 実体を引きかねないため、**`import type { ToolRequest } from '@theia/ai-core/lib/common/language-model'`**(type-only + common サブパス)にして実行時 require を消した(M2/M4 で繰り返した「型は絞った経路から」パターン)。
+3. **`additionalToolRequests` が protected**: base `AbstractChatAgent` の `additionalToolRequests` は `protected` で arschat-tools から代入できない。`ArschatChatAgent` に公開メソッド `setToolRequests()` を足して橋渡しした(agent 側の最小変更)。
+4. **fresh worktree の依存導入**: worktree は依存未導入だったので `yarn install`(BUILD_NOTES 冒頭の corepack EPERM 回避=yarn classic、terser の件は既に electron/browser-app の devDeps に反映済み)。arschat-tools の package.json に `@theia/ai-chat`/`@theia/ai-core`/`@theia/filesystem`/`@theia/workspace`/`arschat-agents` を追加後、再 `yarn install`(= lerna prepare まで走る)で全パッケージ再ビルドが通った。
