@@ -39,7 +39,7 @@
 // *****************************************************************************
 
 import { ContainerModule, interfaces, injectable, inject } from '@theia/core/shared/inversify';
-import { ILogger } from '@theia/core';
+import { CommandContribution, ILogger } from '@theia/core';
 import { FrontendApplicationContribution, RemoteConnectionProvider, ServiceConnectionProvider } from '@theia/core/lib/browser';
 import { ToolInvocationRegistry, bindToolProvider } from '@theia/ai-core/lib/common/tool-invocation-registry';
 import { ArschatChatAgent } from 'arschat-agents/lib/browser/arschat-chat-agent';
@@ -53,6 +53,7 @@ import { FetchPageToolProvider } from './fetch-page-tool-provider';
 import { ARSCHAT_ALL_TOOL_IDS } from '../common/tool-ids';
 import { CommandRunnerService, commandRunnerServicePath } from '../common/command-runner-protocol';
 import { WebFetchService, webFetchServicePath } from '../common/web-fetch-protocol';
+import { ArschatMCPImportContribution } from './mcp-import-contribution';
 
 @injectable()
 export class ArschatToolsRegistrationContribution implements FrontendApplicationContribution {
@@ -111,6 +112,12 @@ export function bindArschatTools(bind: interfaces.Bind): void {
     // Attach the resolved tools to the ArsChat agent on startup.
     bind(ArschatToolsRegistrationContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatToolsRegistrationContribution);
+
+    // M5 e-6: command to import the current ArsChat mcp-config.json into
+    // Theia's `ai-features.mcp.mcpServers` preference. Explicit user action
+    // (no ToolConfirmationManager approval), registered on the command palette.
+    bind(ArschatMCPImportContribution).toSelf().inSingletonScope();
+    bind(CommandContribution).toService(ArschatMCPImportContribution);
 }
 
 export default new ContainerModule(bind => {

@@ -743,3 +743,49 @@ M3 のモック LanguageModel 方式を流用し、**モックが受け取った
 - **回帰なし**: arschat-chat 14/14・arschat-agents 11/11。
 - **ビルド**: `yarn build:electron` webpack **`compiled successfully`**。`tsc` エラー0。生成 backend bundle に `../arschat-tools/lib/node/*.js` **3 module**(backend-module + command-runner + web-fetch)、`common/*.js` 4 module を確認。`src-gen/backend/server.js`・`src-gen/frontend/index.js` に arschat-tools module の `load(...)` を確認。
 - **ライブ検証(実キーでの LLM 往復)**: e-2〜e-4 同様 **API キー不在の検証サンドボックス制約で未実施**(e-10 に集約)。配線は「ToolProvider 登録 → registry 解決 → agent の additionalToolRequests に載る」まで静的に確立済みで、backend サービスは上記 smoke で実 DDG 検索/実ページ取得まで実ネットワークで動作確認済み。受入①(検索結果が回答に反映される配線)②(URL→本文 Markdown が反映される配線)は「6ツールが agent に載る」構造で達成。
+
+## Phase 1 M5 実装メモ (e-6: 旧 ArsChat mcp-config.json を Theia の MCP 設定にインポート)
+
+作成: 2026-07-05 / 対象: PHASE1_DESIGN.md §7・§9 M5(e-6)。現行(Electron 版)ArsChat が `%APPDATA%\ArsChat\arschat-data\mcp-config.json` にランタイム生成する MCP 設定を、Theia 1.71.2 の `@theia/ai-mcp` が読む preference `ai-features.mcp.mcpServers` に**変換して取り込むコマンド**を追加。これで M5 までに作った自前 arschat-tools 群とは別に、MCP は Theia 純正の `@theia/ai-mcp` に乗る(PoC-4 で実動作確認済みの経路)。**Theia 本体は一切改変せず**、全パッケージ 1.71.2 ピン留め維持。追加依存は `@theia/ai-mcp 1.71.2`(arschat-tools/package.json、preference key と型を import するため。root node_modules に hoist 済みで解決可)。
+
+### 変換先スキーマの裏取り(必須調査)
+
+`node_modules/@theia/ai-mcp/src/common/mcp-preferences.ts`(preference schema)+ `src/browser/mcp-frontend-application-contribution.ts`(preference→`MCPServerDescription` に落とす実コード)+ `src/common/mcp-server-manager.ts`(型)+ `src/node/mcp-server.ts`(実トランスポート)を実ソースで確認した結果:
+
+- **(a) http / streamable-http のサポート**: **両方サポートされる**。ただし Theia 側に `type` 判別子は無く、**構造で判定**(`command` があれば local=stdio、`serverUrl` があれば remote。`isLocalMCPServerDescription`/`isRemoteMCPServerDescription`)。remote の実トランスポート(`mcp-server.ts`)は **常に StreamableHTTP を先に試し、失敗したら SSE にフォールバック**するので、旧 `http` と `streamable-http` は**どちらも 1 個の `serverUrl` remote エントリに落として情報欠落なし**(型の統合で失うものは無い)。
+- **(b) `enabled:false` 相当**: 直接の対応は無く、最も近いのは **`autostart`(既定 true、"only takes effect after a restart")**。よって **`enabled:false` → `autostart:false`**(=取り込むが自動起動しない。黙って落とさない)。`enabled:true`/省略 → `autostart` を書かない(Theia 既定 true)。
+- **(c) env / headers**: local は `env`(string→string map)、remote は `headers`(string→string map)+ `serverAuthToken`/`serverAuthTokenHeader`。旧設定の `env`/`headers` はそのまま透過。**空マップ `{}` は preference に書かない**(ノイズ除去)。
+- **`description`**: preference スキーマに**存在しない → 破棄**(黙って落とさず「注記」に載せる)。
+
+### 変換マッピング表(旧 → 新)
+
+| 旧 MCPServerConfig | 新 `ai-features.mcp.mcpServers[name]` | 備考 |
+| --- | --- | --- |
+| `name` | オブジェクトのキー | 空ならスキップ(Theia はキー必須)。同名重複は先勝ち+警告 |
+| `type: 'stdio'` + `command`/`args`/`env` | `{ command, args?, env? }`(local) | 空 args/env は省略 |
+| `type: 'http'`/`'streamable-http'` + `url`/`headers` | `{ serverUrl, headers? }`(remote) | http と streamable-http は同一表現。StreamableHTTP→SSE フォールバックは Theia 側が実施 |
+| `enabled: false` | `autostart: false` | 取り込むが自動起動しない |
+| `enabled: true`/省略 | (`autostart` 未設定=既定 true) | |
+| `description` | **(破棄)** | スキーマに無い。注記に記録 |
+| type 不明/欠落 | フィールドで判定(command→local / url→remote / 両方無し→スキップ警告) | Theia 自身も構造判定なのに合わせた |
+
+**落ちる情報**: `description`(スキーマ非対応)、旧 `type` 文字列(構造で吸収されるため保持不要)。それ以外(command/args/env/url/headers)は全て保持。
+
+### 実装(SPEC 方針5 + リーダー指示どおり)
+
+1. **pure 変換** `src/common/mcp-config-import.ts`: `convertLegacyMCPConfig(unknown) → { servers, warnings[], notes[], importedCount }` と `mergeIntoExisting(existing, incoming) → { merged, skippedExisting[] }`。**Theia 非依存**(inversify/FileService 不使用)なので jest で固定フィクスチャ検証可能。変換不能サーバー(name 空 / command も url も無い / servers 配列でないルート)は throw せず **warnings に理由付きで積む**。同名重複は**先勝ち**で warning(Theia 設定は name キーで一意なので後勝ちだと最初が消える)。
+2. **コマンド** `src/browser/mcp-import-contribution.ts`(`CommandContribution`): コマンド `arschat-tools:mcp:import-legacy`「ArsChat: 旧 ArsChat から MCP 設定をインポート」をコマンドパレット登録。既定パス(`EnvVariablesServer.getValue('APPDATA')` → `ArsChat/arschat-data/mcp-config.json`、POSIX は `XDG_CONFIG_HOME`/`HOME/.config` fallback)を試し、**無ければ `FileDialogService.showOpenDialog` でファイル選択**。読み込みは Theia の `FileService.read`(Electron の disk provider は任意ローカルパスを読める。ArschatFileToolsService と同じ規律で node fs 直叩き回避)。変換 → `mergeIntoExisting` で**既存 preference と非破壊マージ(既存が勝ち、衝突は報告)** → `PreferenceService.set(MCP_SERVERS_PREF, merged, PreferenceScope.User)` → 結果(取り込み数/スキップ理由/注記/再起動案内)を `MessageService` で通知(warning があれば `warn`、無ければ `info`)。
+3. **承認フロー無し**: インポートは明示的ユーザー操作なので `ToolConfirmationManager`(e-3/e-4 の agent ツール承認)は無関係。旧ファイルは**読み取りのみ**。
+4. **配線** `src/browser/arschat-tools-frontend-module.ts` に `bind(ArschatMCPImportContribution)` + `bind(CommandContribution).toService(...)` を追記。electron-app は既に `@theia/ai-mcp` 依存済み。
+
+### 検証結果(正直に)
+
+- **jest: arschat-tools 70/70 PASS(e-5 の 55 から +15)**。`mcp-config-import.test.ts` 15 本、受入条件3の必須フィクスチャ(stdio / http / streamable-http / enabled:false / フィールド欠落)を全網羅 + 追加(非空 env 透過・type 不明時のフィールド fallback・同名重複先勝ち・空 name スキップ・不正ルート 5 パターンで throw せず warning・**実データ相当の 4 サーバー一括**・description 破棄注記の有無・`mergeIntoExisting` の追加/非上書き/undefined base)。回帰なし(chat 14/14・agents 11/11)。
+- **実 mcp-config.json での dry-run(受入条件5)**: 実在の `%APPDATA%\ArsChat\arschat-data\mcp-config.json`(4 サーバー)を**読み取りのみ**で変換関数に食わせた結果 → **`importedCount=4` / warnings=0**。`filesystem`・`Atlassian`・`discord` は `{ command:'npx', args:[...] }`(stdio→local)、`resonitelink` は `{ serverUrl:'http://127.0.0.1:7790/mcp' }`(streamable-http→remote)。注記は description 破棄 3 件(discord のみ description 空で注記なし)。**preference への書き込みはしていない**(dry-run は変換関数のみ)。
+- **ビルド**: `yarn build:electron` webpack **`compiled successfully`**、`tsc` エラー0。生成 frontend bundle(`arschat-tools_lib_browser_arschat-tools-frontend-module_js.js`)に コマンド id `arschat-tools:mcp:import-legacy` とラベル「旧 ArsChat から MCP 設定をインポート」が含まれることを確認。
+- **ライブ検証(実際に UI からインポート実行)**: e-2〜e-5 同様、検証サンドボックスの GUI 制約で未実施。ただし変換ロジックは実データで dry-run 済み、書き込みは Theia 標準 `PreferenceService.set` + `MCP_SERVERS_PREF`(PoC-4 で `@theia/ai-mcp` がこの preference を読んでサーバー起動することは確認済み)なので、**受入①(変換結果が preference に書かれ ai-mcp が起動できる状態になる)は「実データで正しい形に変換 + 純正 preference key へ set」で構造的に達成**。受入②(変換不能を理由付き通知)は warnings/notes を MessageService に出す実装で達成。
+
+### ハマった点
+
+- 変換先に `type` 判別子が無いのは最初直感に反したが、`isLocalMCPServerDescription`/`isRemoteMCPServerDescription` が `command`/`serverUrl` の有無だけで分岐しているのを実ソースで確認して確信。http と streamable-http を 1 表現に統合できるのはこのおかげ(SSE フォールバックまで Theia 側が持つ)。
+- jest テストで local 値に対し `.serverUrl` の非存在を assert する際、`TheiaLocalMCPServerValue as TheiaRemoteMCPServerValue` の直キャストは TS2352(重なり不足)。`as unknown as Record<string, unknown>` 経由に。

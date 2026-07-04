@@ -4,7 +4,7 @@
     "theia-extension"
   ],
   "version": "0.0.1",
-  "description": "ArsChat AI tools registered as @theia/ai-core ToolProviders and wired into the ArsChat ChatAgent (PHASE1_DESIGN.md §7). M5: read_file / write_file / edit_file (e-2/e-3), the approval flow (e-3), run_command (e-4, backend + JSON-RPC), and web_search / fetch_page (e-5, DuckDuckGo scrape + Turndown, backend).",
+  "description": "ArsChat AI tools registered as @theia/ai-core ToolProviders and wired into the ArsChat ChatAgent (PHASE1_DESIGN.md §7). M5: read_file / write_file / edit_file (e-2/e-3), the approval flow (e-3), run_command (e-4, backend + JSON-RPC), web_search / fetch_page (e-5, DuckDuckGo scrape + Turndown, backend), and the legacy MCP config importer (e-6, converts the current ArsChat mcp-config.json into @theia/ai-mcp's ai-features.mcp.mcpServers preference).",
   "author": "Fukuro99",
   "license": "MIT",
   "files": [
@@ -14,6 +14,7 @@
   "dependencies": {
     "@theia/ai-chat": "1.71.2",
     "@theia/ai-core": "1.71.2",
+    "@theia/ai-mcp": "1.71.2",
     "@theia/core": "1.71.2",
     "@theia/filesystem": "1.71.2",
     "@theia/workspace": "1.71.2",
