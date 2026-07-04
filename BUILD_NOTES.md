@@ -631,3 +631,37 @@ M3 のモック LanguageModel 方式を流用し、**モックが受け取った
 2. **`ToolRequest` 型の import 元**: `common/file-tool-requests.ts` で `@theia/ai-core` バレルから値 import すると browser 実体を引きかねないため、**`import type { ToolRequest } from '@theia/ai-core/lib/common/language-model'`**(type-only + common サブパス)にして実行時 require を消した(M2/M4 で繰り返した「型は絞った経路から」パターン)。
 3. **`additionalToolRequests` が protected**: base `AbstractChatAgent` の `additionalToolRequests` は `protected` で arschat-tools から代入できない。`ArschatChatAgent` に公開メソッド `setToolRequests()` を足して橋渡しした(agent 側の最小変更)。
 4. **fresh worktree の依存導入**: worktree は依存未導入だったので `yarn install`(BUILD_NOTES 冒頭の corepack EPERM 回避=yarn classic、terser の件は既に electron/browser-app の devDeps に反映済み)。arschat-tools の package.json に `@theia/ai-chat`/`@theia/ai-core`/`@theia/filesystem`/`@theia/workspace`/`arschat-agents` を追加後、再 `yarn install`(= lerna prepare まで走る)で全パッケージ再ビルドが通った。
+
+## Phase 1 M5 実装メモ (e-3: 承認ダイアログ + ツール実行カード、write系を無確認から卒業)
+
+作成: 2026-07-05 / 対象: PHASE1_DESIGN.md §5(ツールコールカード)・§9 M5(e-3)。e-2 の暫定(write/edit が無確認で disk を書き換える)を解消し、**write_file / edit_file をツール要求時に承認必須**にした。承認 UI と実行状態カードを **自前 ArschatChatWidget** に実装。**Theia本体は一切改変せず、Theia 1.71.2 の確認機構(`FrontendChatToolRequestService` + `ToolConfirmationManager`)にそのまま乗せた。**
+
+### どの Theia 機構に乗ったか(実測で裏取り)
+
+確認の実体は `@theia/ai-chat` の `FrontendChatToolRequestService.toChatToolRequest()`(browser)。これが各ツールの handler をラップし、`ToolConfirmationManager.getConfirmationMode(toolId, sessionId, toolRequest)` の戻り(`ALWAYS_ALLOW` / `CONFIRM` / `DISABLED`)で分岐する(`node_modules/@theia/ai-chat/lib/browser/chat-tool-request-service.js` 実読)。
+
+- **CONFIRM 分岐の挙動**: 対応する `ToolCallChatResponseContent` を response 内から見つけ、`content.requestUserConfirmation()`(= `needsUserConfirmation` promise を解決)+ `request.response.fireInteractionNeeded(content)` を発火し、`content.confirmed`(`raceConfirmationWithTimeout` 経由)を **await して実行を止める**。UI が `content.confirm()` を呼べば `confirmed=true` で resolve → handler 本体(= 我々の write/edit)が走る。`content.deny(reason)` を呼べば `confirmed=false` で `{ denied:true, reason }` を tool result として返し、**handler 本体は実行されない**(受入②を Theia 側が構造的に保証)。
+- **confirm-required の立て方**: `getConfirmationMode()` の既定は「`confirmAlwaysAllow` 無し=ALWAYS_ALLOW / 有り=CONFIRM」。かつ `confirmAlwaysAllow` 付きツールはグローバル `'*': ALWAYS_ALLOW` からも CONFIRM に落とす(`chat-tool-preference-bindings.js` 実読)。→ **`createWriteFileTool` / `createEditFileTool` の ToolRequest に `confirmAlwaysAllow`(文字列=always-allow 時の警告文)を付与するだけ**で毎回確認に落ちる(受入③)。`ToolRequest.confirmAlwaysAllow?: boolean | string`(ai-core language-model.d.ts で確認)。read_file は付けず ALWAYS_ALLOW のまま(受入③後段)。
+- **セッション/永続スコープ**: 「このセッション中」= `ToolConfirmationManager.setSessionConfirmationMode(toolId, ALWAYS_ALLOW, chatId)`(in-memory Map、非永続)、「常に許可」= `setConfirmationMode(toolId, ALWAYS_ALLOW)`(preference `ai-features.chat.toolConfirmation` に永続)。**状態管理は Theia の manager をそのまま呼び、自前で再発明していない**(引き継ぎ指示どおり)。ai-chat frontend module が両者を `inSingletonScope` で bind 済みなので、追加 bind 不要でそのまま inject できる。
+
+### 自前部分(ArschatChatWidget)
+
+- **カードの view-model `ToolCallView`**: `{ content: ToolCallChatResponseContent, state: 'confirm'|'running'|'done'|'denied', open?, wired? }`。`syncToolCalls()` が response content 中の `ToolCallChatResponseContent.is(c)` 部分を検出し、`content` を key に既存カードと突き合わせて生成/更新(M3 の rAF バッチ repaint にそのまま乗る)。
+- **状態遷移の駆動**: `wireToolCall()` が各 content の promise を1度だけ購読 — `needsUserConfirmation`→`confirm`(承認待ち)、`confirmed`→`running`/`denied`、`whenFinished`→`done`/`denied`。ポーリングなし。
+- **承認 UI**: `confirm` 状態のカードに **[許可][セッション中][常に許可] + [拒否]**。`onToolAllow(view, scope)` が scope に応じて manager を叩いてから `content.confirm()`、`onToolDeny(view)` が `content.deny()`。
+- **カード表示**: 承認待ち(黄・ボタン)→ 実行中(スピナー)→ 結果(✓/✕、出力を `<pre>` で表示、2000字超は折り畳み+`すべて表示`)。拒否は赤・理由表示。復元セッションの過去ツールコールも `syncToolCalls` で done カードとして再表示(`appendRestoredRequest`)。
+- **`responseToText` の調整**: tool call 部分は `asString()` が `''` なので元々テキストは汚さないが、明示的に `kind !== 'toolCall'` で除外(将来 kind 追加時の保険)。
+- **ついでの小改善(レビュー指摘)**: read_file handler に上限 `READ_FILE_MAX_CHARS = 50,000` を追加、超過時は先頭 5万字 + `...(truncated: ...)` を返す(`file-tool-requests.ts`)。
+
+### 検証結果
+
+- **承認フローの経路検証(ユニット)**: `arschat-chat-widget.test.ts` に3本追加 — (1) `syncToolCalls` で write_file の承認待ちカードが描画され [許可/セッション中/常に許可/拒否] が出る、(2) `onToolAllow(view,'once')` が `content.confirmed` を `true` に resolve し state=running(= handler 本体が走る経路)、(3) `onToolDeny` が `content.finished=true` かつ `result.denied=true`(= tool 実行が止まり denial が LLM に返る経路)。**Theia の `ToolCallChatResponseContentImpl` 実クラスを直接使って**、confirm/deny が本物の状態機械を正しく駆動することを確認(モックではなく実体)。write/edit の `confirmAlwaysAllow` 付与は tools 側テストで検証。
+- **jest**: **arschat-tools 14/14**(+2: read_file 5万字 truncation、write/edit が confirm-required)・**arschat-chat 14/14**(+3: 上記カード/承認)・**arschat-agents 11/11(回帰なし)**。
+- **ビルド**: `yarn build:electron` webpack **`compiled successfully`**。全パッケージ `tsc` エラー0。
+- **ライブ検証(実キーでの往復)**: e-2 同様 **API キー不在の検証サンドボックス制約で未実施**。承認機構は Theia 実ソースの `FrontendChatToolRequestService` 経路に静的に乗っており(await confirmed → handler)、`ToolCallChatResponseContentImpl` 実体を使ったユニットで confirm→実行 / deny→停止 の両分岐を検証済み。実プロバイダでの UI 往復は e-4 以降で実機確認する想定。
+
+### ハマった点
+
+1. **jest が browser confirmation-bindings で死ぬ**: widget が `ToolConfirmationManager`(`@theia/ai-chat/lib/browser/chat-tool-preference-bindings`)を inject するようになった途端、jest が同モジュール→`trust-aware-preference-reader`→`@theia/core/src/browser`(hover-service.tsx 等の DOM ツリー)を辿って `Unexpected token ':'` で落ちた(node_modules は transform-ignore)。widget は**このクラスを DI トークンとしてしか使わない**(メソッドはテストで定数 bind して差し替え)ので、jest の `moduleNameMapper` で当該 browser モジュールだけを軽量スタブ(`configs/stubs/chat-tool-preference-bindings.js`、空クラス)に差し替えて解決。common 側の `ToolConfirmationMode`(enum)や `ToolCallChatResponseContentImpl` は browser を引かないのでそのまま使える。
+2. **`confirmAlwaysAllow` の意味論**: 「毎回確認」を出すのに preference を書き換えるのではなく、ツール側の `confirmAlwaysAllow` フラグを立てるのが正解(`getConfirmationMode` が既定 CONFIRM に落とし、かつグローバル `'*': ALWAYS_ALLOW` の上書きも無効化する)。文字列を渡すと always-allow 昇格時の警告文にもなる(`WRITE_TOOL_CONFIRM_WARNING`)。二重の役割を1フラグが担う。
+3. **e-2 の handler 戻り型**: read_file の truncation テストで `handler(...)` の戻りが `string | object | ToolCallContent` なので `as string` キャストが要る(ToolRequest.handler の union 型)。

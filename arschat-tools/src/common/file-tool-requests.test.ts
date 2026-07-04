@@ -3,7 +3,7 @@
 // through the FileToolBackend and format results/errors the way the LLM sees
 // them. Theia-DI-free (fake backend), so runs in a plain node jest env like the
 // arschat-agents common/ tests.
-import { createReadFileTool, createWriteFileTool, createEditFileTool, FileToolBackend } from './file-tool-requests';
+import { createReadFileTool, createWriteFileTool, createEditFileTool, FileToolBackend, READ_FILE_MAX_CHARS } from './file-tool-requests';
 import { READ_FILE_TOOL_ID, WRITE_FILE_TOOL_ID, EDIT_FILE_TOOL_ID, ARSCHAT_TOOL_PROVIDER_NAME } from './tool-ids';
 import { applyEdit } from './edit-file';
 
@@ -42,7 +42,7 @@ describe('file tool ToolRequests (factory shape + handler wiring)', () => {
         expect(tool.providerName).toBe(ARSCHAT_TOOL_PROVIDER_NAME);
         expect(tool.parameters.required).toContain('path');
         expect(typeof tool.handler).toBe('function');
-        // e-2: no confirmAlwaysAllow -> default ALWAYS_ALLOW (unconfirmed).
+        // read_file is read-only -> stays unconfirmed (no confirmAlwaysAllow flag).
         expect(tool.confirmAlwaysAllow).toBeUndefined();
     });
 
@@ -54,6 +54,24 @@ describe('file tool ToolRequests (factory shape + handler wiring)', () => {
         expect(await tool.handler(JSON.stringify({ path: 'missing.txt' }))).toMatch(/^ERROR: /);
         expect(await tool.handler(JSON.stringify({}))).toMatch(/requires a non-empty "path"/);
         expect(await tool.handler('not json')).toMatch(/requires a non-empty "path"/);
+    });
+
+    it('read_file truncates content over the char limit and marks it (e-3 review nit)', async () => {
+        const be = new FakeBackend();
+        const big = 'x'.repeat(READ_FILE_MAX_CHARS + 100);
+        be.files.set('big.txt', big);
+        const tool = createReadFileTool(be);
+        const out = await tool.handler(JSON.stringify({ path: 'big.txt' })) as string;
+        expect(out.length).toBeLessThan(big.length);
+        expect(out).toMatch(/\.\.\.\(truncated/);
+        // A file exactly at the limit is returned verbatim.
+        be.files.set('exact.txt', 'y'.repeat(READ_FILE_MAX_CHARS));
+        expect(await tool.handler(JSON.stringify({ path: 'exact.txt' }))).not.toMatch(/truncated/);
+    });
+
+    it('write_file / edit_file are confirm-required (confirmAlwaysAllow set)', () => {
+        expect(createWriteFileTool(new FakeBackend()).confirmAlwaysAllow).toBeTruthy();
+        expect(createEditFileTool(new FakeBackend()).confirmAlwaysAllow).toBeTruthy();
     });
 
     it('write_file creates then overwrites, and reports the outcome', async () => {

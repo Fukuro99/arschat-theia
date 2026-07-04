@@ -8,8 +8,8 @@
 //
 // Approval: read_file is read-only, so its ToolRequest carries no
 // `confirmAlwaysAllow`. Under Theia 1.71.2's default confirmation mode
-// (ALWAYS_ALLOW for normal tools) it runs without a confirmation prompt. The
-// real approval UI is e-3's job (see frontend module TODO / BUILD_NOTES).
+// (ALWAYS_ALLOW for normal tools) it runs without a confirmation prompt - unlike
+// write_file / edit_file, which are confirm-required as of e-3.
 // *****************************************************************************
 
 import { inject, injectable } from '@theia/core/shared/inversify';

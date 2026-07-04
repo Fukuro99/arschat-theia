@@ -24,6 +24,23 @@ export interface FileToolBackend {
     editFile(path: string, params: EditFileParams): Promise<EditFileResult & { uri: string }>;
 }
 
+/**
+ * Upper bound on how much file content read_file feeds back to the model. A giant
+ * file would otherwise blow the context window; we truncate and mark it so the
+ * model knows the content is incomplete. (Review nit from e-2; done in e-3.)
+ */
+export const READ_FILE_MAX_CHARS = 50_000;
+
+/**
+ * Human/LLM-facing warning shown on write_file / edit_file when the user is asked
+ * to enable "always allow". Passed as the `confirmAlwaysAllow` string so Theia's
+ * confirmation manager treats these tools as confirm-required (not ALWAYS_ALLOW)
+ * and surfaces this text in the always-allow escalation. See PHASE1_DESIGN.md §5.
+ */
+export const WRITE_TOOL_CONFIRM_WARNING =
+    'This tool writes to disk. Enabling auto-approval lets the assistant modify files without asking. '
+    + 'Only enable this if you trust the current task.';
+
 export function createReadFileTool(backend: FileToolBackend): ToolRequest {
     return {
         id: READ_FILE_TOOL_ID,
@@ -47,7 +64,12 @@ export function createReadFileTool(backend: FileToolBackend): ToolRequest {
                 if (!path) {
                     return toolError('read_file requires a non-empty "path" argument.');
                 }
-                return await backend.readFile(path);
+                const content = await backend.readFile(path);
+                if (content.length > READ_FILE_MAX_CHARS) {
+                    return content.slice(0, READ_FILE_MAX_CHARS)
+                        + `\n\n...(truncated: file is ${content.length} chars, showing first ${READ_FILE_MAX_CHARS})`;
+                }
+                return content;
             } catch (e) {
                 return toolError(e instanceof Error ? e.message : String(e));
             }
@@ -60,7 +82,12 @@ export function createWriteFileTool(backend: FileToolBackend): ToolRequest {
         id: WRITE_FILE_TOOL_ID,
         name: WRITE_FILE_TOOL_ID,
         providerName: ARSCHAT_TOOL_PROVIDER_NAME,
-        // TODO(e-3): route through the ArsChat approval flow before the write.
+        // e-3: write_file mutates the disk, so it is confirm-required. The string form
+        // of confirmAlwaysAllow (a) forces Theia's ToolConfirmationManager into CONFIRM
+        // mode instead of the default ALWAYS_ALLOW, so every call raises the ArsChat
+        // approval card, and (b) is shown as the warning when the user enables
+        // "always allow". See arschat-chat-widget.tsx (tool call cards).
+        confirmAlwaysAllow: WRITE_TOOL_CONFIRM_WARNING,
         description: 'Write text content to a file, overwriting it if it already exists and creating '
             + 'parent folders as needed. `path` may be absolute or relative to the workspace root. '
             + 'Use edit_file for small in-place changes to an existing file.',
@@ -101,7 +128,8 @@ export function createEditFileTool(backend: FileToolBackend): ToolRequest {
         id: EDIT_FILE_TOOL_ID,
         name: EDIT_FILE_TOOL_ID,
         providerName: ARSCHAT_TOOL_PROVIDER_NAME,
-        // TODO(e-3): route through the ArsChat approval flow before the write.
+        // e-3: edit_file mutates the disk, so it is confirm-required (see write_file above).
+        confirmAlwaysAllow: WRITE_TOOL_CONFIRM_WARNING,
         description: 'Make an exact in-place edit to an existing file by replacing `oldString` with '
             + '`newString`. `oldString` must occur exactly once unless `replaceAll` is true. `path` may '
             + 'be absolute or relative to the workspace root.',

@@ -400,6 +400,140 @@
     to { transform: rotate(360deg); }
 }
 
+/* ===================== M5 e-3: tool call cards ===================== */
+.arschat-tool-calls {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px 0 2px;
+}
+
+.arschat-tool-card {
+    border: 1px solid var(--theia-editorGroup-border, rgba(255, 255, 255, 0.12));
+    border-left: 3px solid var(--theia-descriptionForeground, #888);
+    border-radius: 4px;
+    background: var(--theia-editorWidget-background, rgba(255, 255, 255, 0.03));
+    padding: 6px 8px;
+    font-size: 12px;
+}
+
+.arschat-tool-card-confirm {
+    border-left-color: var(--theia-editorWarning-foreground, #e0a03a);
+    background: rgba(224, 160, 58, 0.08);
+}
+
+.arschat-tool-card-running {
+    border-left-color: var(--theia-focusBorder, #6272a4);
+}
+
+.arschat-tool-card-done {
+    border-left-color: var(--theia-successBackground, #388a34);
+}
+
+.arschat-tool-card-denied {
+    border-left-color: var(--theia-editorError-foreground, #f14c4c);
+}
+
+.arschat-tool-card-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.arschat-tool-card-status {
+    display: inline-block;
+    width: 14px;
+    text-align: center;
+}
+
+.arschat-tool-card-status.done { color: var(--theia-successBackground, #4caf50); }
+.arschat-tool-card-status.denied { color: var(--theia-editorError-foreground, #f14c4c); }
+.arschat-tool-card-status.confirm { color: var(--theia-editorWarning-foreground, #e0a03a); }
+
+.arschat-tool-card-name {
+    font-family: var(--theia-code-font-family, monospace);
+    font-weight: 600;
+}
+
+.arschat-tool-card-label {
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+.arschat-tool-card-spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--theia-focusBorder, #6272a4);
+    border-top-color: transparent;
+    border-radius: 50%;
+    display: inline-block;
+    animation: arschat-spin 0.8s linear infinite;
+}
+
+.arschat-tool-card-args {
+    margin-top: 4px;
+    font-family: var(--theia-code-font-family, monospace);
+    font-size: 11px;
+    color: var(--theia-descriptionForeground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.arschat-tool-card-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+
+.arschat-tool-approve-group {
+    display: inline-flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.arschat-tool-card-actions .theia-button {
+    font-size: 11px;
+    padding: 2px 8px;
+    margin: 0;
+}
+
+.arschat-tool-card-result {
+    margin-top: 6px;
+}
+
+.arschat-tool-card-output {
+    margin: 0;
+    padding: 6px 8px;
+    max-height: 240px;
+    overflow: auto;
+    background: var(--theia-editor-background, rgba(0, 0, 0, 0.25));
+    border-radius: 3px;
+    font-family: var(--theia-code-font-family, monospace);
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.arschat-tool-card-result-denied {
+    color: var(--theia-editorError-foreground, #f14c4c);
+    font-size: 11px;
+    margin-top: 6px;
+}
+
+.arschat-tool-card-toggle {
+    margin-top: 4px;
+    background: none;
+    border: none;
+    color: var(--theia-textLink-foreground, #4daafc);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0;
+}
+
 /* ===================== M3: history panel ===================== */
 .arschat-history-widget {
     background: var(--theia-sideBar-background);

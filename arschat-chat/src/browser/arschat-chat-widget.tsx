@@ -24,7 +24,9 @@ import { Message } from '@theia/core/lib/browser';
 import { DisposableCollection } from '@theia/core';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
-import { ChatResponseModel, ChatRequestModel } from '@theia/ai-chat/lib/common/chat-model';
+import { ChatResponseModel, ChatRequestModel, ToolCallChatResponseContent } from '@theia/ai-chat/lib/common/chat-model';
+import { ToolConfirmationManager } from '@theia/ai-chat/lib/browser/chat-tool-preference-bindings';
+import { ToolConfirmationMode } from '@theia/ai-chat/lib/common/chat-tool-preferences';
 import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-variable';
 import { AIVariableResolutionRequest } from '@theia/ai-core';
 import { LanguageModel } from '@theia/ai-core';
@@ -50,6 +52,27 @@ interface PendingImage {
     previewUrl: string;
 }
 
+/**
+ * View-model for one tool call rendered as a card in an assistant message.
+ *
+ * `content` is the live @theia/ai-chat ToolCallChatResponseContent; the actual
+ * confirmation state machine (confirm()/deny(), needsUserConfirmation, confirmed,
+ * whenFinished) lives on it - we only mirror the derived `state` for rendering
+ * and drive the buttons back into `content`. This is the M5 e-3 "tool call card"
+ * (PHASE1_DESIGN.md §5): 承認待ち -> 実行中 -> 結果.
+ */
+interface ToolCallView {
+    /** stable card key (the tool call id, or a fallback index). */
+    key: string;
+    content: ToolCallChatResponseContent;
+    /** derived UI state for the card. */
+    state: 'confirm' | 'running' | 'done' | 'denied';
+    /** whether the (potentially long) result body is expanded. */
+    open?: boolean;
+    /** subscriptions on `content`'s promises are wired exactly once. */
+    wired?: boolean;
+}
+
 interface UiMessage {
     id: number;
     author: 'user' | 'assistant';
@@ -59,7 +82,14 @@ interface UiMessage {
     streaming?: boolean;
     /** open/closed state of the think block for this assistant message. */
     thinkOpen?: boolean;
+    /** tool call cards for this assistant message, in response order (M5 e-3). */
+    toolCalls?: ToolCallView[];
+    /** the live response model backing a streaming/just-finished assistant message. */
+    response?: ChatResponseModel;
 }
+
+/** How much of a tool result we show before the fold (chars). */
+const TOOL_RESULT_PREVIEW_CHARS = 2000;
 
 @injectable()
 export class ArschatChatWidget extends ReactWidget {
@@ -84,6 +114,9 @@ export class ArschatChatWidget extends ReactWidget {
 
     @inject(ArschatChatUiService)
     protected readonly uiService!: ArschatChatUiService;
+
+    @inject(ToolConfirmationManager)
+    protected readonly toolConfirmationManager!: ToolConfirmationManager;
 
     protected sessionId: string | undefined;
     /** id of the request currently being generated (for abort). */
@@ -257,7 +290,11 @@ export class ArschatChatWidget extends ReactWidget {
         const userText = req.request.displayText ?? req.request.text ?? '';
         this.messages.push({ id: this.nextId++, author: 'user', text: userText });
         const assistantText = this.responseToText(req.response);
-        this.messages.push({ id: this.nextId++, author: 'assistant', text: assistantText, thinkOpen: false });
+        const assistant: UiMessage = { id: this.nextId++, author: 'assistant', text: assistantText, thinkOpen: false };
+        // Restored responses are already finished; surface their tool calls as
+        // completed cards (they never re-enter the confirm state).
+        this.syncToolCalls(assistant, req.response);
+        this.messages.push(assistant);
     }
 
     // ---------------------------------------------------------------- images
@@ -406,8 +443,10 @@ export class ArschatChatWidget extends ReactWidget {
             this.inflightRequestId = requestModel.id;
 
             const response = await invocation.responseCreated;
+            assistant.response = response;
             const sub = response.onDidChange(() => {
                 assistant.text = this.responseToText(response);
+                this.syncToolCalls(assistant, response);
                 this.scheduleRender();
                 if (response.isComplete || response.isError || response.isCanceled) {
                     assistant.streaming = false;
@@ -416,6 +455,7 @@ export class ArschatChatWidget extends ReactWidget {
             });
             await invocation.responseCompleted;
             assistant.text = this.responseToText(response);
+            this.syncToolCalls(assistant, response);
             assistant.streaming = false;
         } catch (e) {
             assistant.text = `(error: ${e instanceof Error ? e.message : String(e)})`;
@@ -454,8 +494,141 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected responseToText(response: ChatResponseModel): string {
-        const parts = response.response.content as Array<{ asString?: () => string | undefined; asDisplayString?: () => string | undefined }>;
-        return parts.map(c => c.asString?.() ?? c.asDisplayString?.() ?? '').join('');
+        // Tool call parts contribute '' to asString(), so they never pollute the
+        // visible text; they are rendered as cards separately (syncToolCalls).
+        const parts = response.response.content as Array<{ asString?: () => string | undefined; asDisplayString?: () => string | undefined; kind?: string }>;
+        return parts
+            .filter(c => c.kind !== 'toolCall')
+            .map(c => c.asString?.() ?? c.asDisplayString?.() ?? '').join('');
+    }
+
+    // ---------------------------------------------------------------- tool call cards (M5 e-3)
+
+    /**
+     * Reconcile the assistant message's tool-call cards with the tool call parts
+     * currently in the response. New tool calls get a ToolCallView and (once) a
+     * subscription to their confirmation/finish promises so the card advances
+     * 承認待ち -> 実行中 -> 結果 without us polling. Existing cards keep their UI
+     * state (open/denied) across re-renders.
+     */
+    protected syncToolCalls(msg: UiMessage, response: ChatResponseModel): void {
+        const toolParts = (response.response.content as Array<{ kind?: string }>)
+            .filter((c): c is ToolCallChatResponseContent => ToolCallChatResponseContent.is(c));
+        if (toolParts.length === 0 && !msg.toolCalls) {
+            return;
+        }
+        const existing = new Map((msg.toolCalls ?? []).map(v => [v.content, v]));
+        const views: ToolCallView[] = toolParts.map((content, i) => {
+            const view = existing.get(content) ?? {
+                key: content.id ?? `tc-${msg.id}-${i}`,
+                content,
+                state: this.deriveToolState(content)
+            } as ToolCallView;
+            this.wireToolCall(msg, view);
+            // Keep the derived state fresh unless the user has already answered
+            // (confirm/running/done are promise-driven; only refresh finished flags).
+            if (view.state !== 'denied') {
+                view.state = this.deriveToolState(content);
+            }
+            return view;
+        });
+        msg.toolCalls = views;
+    }
+
+    /** Map a tool call's current model state to the card's UI state. */
+    protected deriveToolState(content: ToolCallChatResponseContent): ToolCallView['state'] {
+        if (content.finished) {
+            return ToolCallChatResponseContent.isDenialResult(content.result) ? 'denied' : 'done';
+        }
+        return 'running';
+    }
+
+    /**
+     * Wire a card's promises exactly once. `needsUserConfirmation` flips the card
+     * into the 承認待ち (confirm) state - this is the interaction the CONFIRM branch
+     * of FrontendChatToolRequestService fires. `confirmed`/`whenFinished` advance
+     * it to 実行中 / 結果. Repaints are scheduled so the card updates live.
+     */
+    protected wireToolCall(msg: UiMessage, view: ToolCallView): void {
+        if (view.wired) {
+            return;
+        }
+        view.wired = true;
+        const content = view.content;
+        content.needsUserConfirmation.then(() => {
+            if (view.state !== 'denied' && !content.finished) {
+                view.state = 'confirm';
+                this.scheduleRender();
+            }
+        });
+        content.confirmed.then(confirmed => {
+            if (confirmed) {
+                if (view.state === 'confirm') {
+                    view.state = 'running';
+                }
+            } else {
+                view.state = 'denied';
+            }
+            this.scheduleRender();
+        }).catch(() => {
+            // cancelConfirmation (timeout/abort) rejects the promise.
+            view.state = 'denied';
+            this.scheduleRender();
+        });
+        content.whenFinished.then(() => {
+            if (view.state !== 'denied') {
+                view.state = ToolCallChatResponseContent.isDenialResult(content.result) ? 'denied' : 'done';
+            }
+            this.scheduleRender();
+        });
+    }
+
+    /** Chat/session id used to scope "このセッション中" tool-confirmation overrides. */
+    protected confirmationChatId(): string {
+        return this.sessionId ?? '';
+    }
+
+    protected onToolAllow(view: ToolCallView, scope: 'once' | 'session' | 'forever'): void {
+        const toolId = view.content.name;
+        if (toolId && scope === 'forever') {
+            this.toolConfirmationManager.setConfirmationMode(toolId, ToolConfirmationMode.ALWAYS_ALLOW);
+        } else if (toolId && scope === 'session') {
+            this.toolConfirmationManager.setSessionConfirmationMode(toolId, ToolConfirmationMode.ALWAYS_ALLOW, this.confirmationChatId());
+        }
+        view.state = 'running';
+        view.content.confirm();
+        this.update();
+    }
+
+    protected onToolDeny(view: ToolCallView): void {
+        view.state = 'denied';
+        view.content.deny();
+        this.update();
+    }
+
+    protected toggleToolOpen(view: ToolCallView): void {
+        view.open = !view.open;
+        this.update();
+    }
+
+    /** Extract a readable result string from a finished tool call. */
+    protected toolResultText(content: ToolCallChatResponseContent): string {
+        const result = content.result as unknown;
+        if (result === undefined) {
+            return '';
+        }
+        if (typeof result === 'string') {
+            return result;
+        }
+        if (ToolCallChatResponseContent.isDenialResult(result)) {
+            const reason = (result as { reason?: string }).reason;
+            return reason ? `拒否しました: ${reason}` : '拒否しました。';
+        }
+        try {
+            return JSON.stringify(result, undefined, 2);
+        } catch {
+            return String(result);
+        }
     }
 
     protected toggleThink(msg: UiMessage): void {
@@ -717,8 +890,92 @@ export class ArschatChatWidget extends ReactWidget {
                         </div>
                     )}
                     <div className='arschat-markdown' dangerouslySetInnerHTML={{ __html: html }} />
+                    {msg.toolCalls && msg.toolCalls.length > 0 && (
+                        <div className='arschat-tool-calls'>
+                            {msg.toolCalls.map(view => this.renderToolCard(view))}
+                        </div>
+                    )}
                     {msg.streaming && <span className='arschat-chat-cursor'> ▍</span>}
                 </div>
+            </div>
+        );
+    }
+
+    protected renderToolCard(view: ToolCallView): React.ReactElement {
+        const { content, state } = view;
+        const toolName = content.name ?? 'tool';
+        const argsLabel = content.arguments && content.arguments.length > 0 ? content.arguments : '';
+        const statusMeta = this.toolStatusMeta(state);
+        return (
+            <div key={view.key} className={`arschat-tool-card arschat-tool-card-${state}`}>
+                <div className='arschat-tool-card-head'>
+                    {state === 'running'
+                        ? <span className='arschat-tool-card-spinner' />
+                        : <span className={`arschat-tool-card-status ${statusMeta.cls}`}>{statusMeta.icon}</span>}
+                    <span className='arschat-tool-card-name'>{toolName}</span>
+                    <span className='arschat-tool-card-label'>{statusMeta.label}</span>
+                </div>
+                {argsLabel && (
+                    <div className='arschat-tool-card-args' title={argsLabel}>{argsLabel}</div>
+                )}
+                {state === 'confirm' && (
+                    <div className='arschat-tool-card-actions'>
+                        <div className='arschat-tool-approve-group'>
+                            <button
+                                className='theia-button arschat-tool-allow'
+                                title='このツール実行を許可'
+                                onClick={() => this.onToolAllow(view, 'once')}
+                            >許可</button>
+                            <button
+                                className='theia-button secondary arschat-tool-allow-session'
+                                title='このセッション中は毎回許可'
+                                onClick={() => this.onToolAllow(view, 'session')}
+                            >セッション中</button>
+                            <button
+                                className='theia-button secondary arschat-tool-allow-forever'
+                                title='常に許可 (以後このツールは確認しない)'
+                                onClick={() => this.onToolAllow(view, 'forever')}
+                            >常に許可</button>
+                        </div>
+                        <button
+                            className='theia-button secondary arschat-tool-deny'
+                            title='このツール実行を拒否'
+                            onClick={() => this.onToolDeny(view)}
+                        >拒否</button>
+                    </div>
+                )}
+                {state === 'done' && this.renderToolResult(view)}
+                {state === 'denied' && (
+                    <div className='arschat-tool-card-result arschat-tool-card-result-denied'>
+                        {this.toolResultText(content) || 'ツール実行を拒否しました。'}
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    protected toolStatusMeta(state: ToolCallView['state']): { icon: string; label: string; cls: string } {
+        switch (state) {
+            case 'confirm': return { icon: '🛡', label: '承認待ち', cls: 'confirm' };
+            case 'running': return { icon: '', label: '実行中…', cls: 'running' };
+            case 'denied': return { icon: '✕', label: '拒否', cls: 'denied' };
+            case 'done':
+            default: return { icon: '✓', label: '完了', cls: 'done' };
+        }
+    }
+
+    protected renderToolResult(view: ToolCallView): React.ReactElement {
+        const full = this.toolResultText(view.content);
+        const long = full.length > TOOL_RESULT_PREVIEW_CHARS;
+        const shown = view.open || !long ? full : full.slice(0, TOOL_RESULT_PREVIEW_CHARS);
+        return (
+            <div className='arschat-tool-card-result'>
+                <pre className='arschat-tool-card-output'>{shown}{!view.open && long ? '\n…' : ''}</pre>
+                {long && (
+                    <button className='arschat-tool-card-toggle' onClick={() => this.toggleToolOpen(view)}>
+                        {view.open ? '折りたたむ' : `すべて表示 (${full.length} 文字)`}
+                    </button>
+                )}
             </div>
         );
     }

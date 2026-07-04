@@ -8,10 +8,11 @@
 // and writes the result back. Registered via bindToolProvider() in
 // arschat-tools-frontend-module.ts.
 //
-// Approval (INTERIM - e-3 will replace this): edit_file mutates the disk. As
-// with write_file, M5 e-2 leaves `confirmAlwaysAllow` unset so the tool runs
-// UNCONFIRMED under Theia 1.71.2's default confirmation mode. This is the
-// documented e-2 stopgap; the approval flow lands in e-3. See BUILD_NOTES.md.
+// Approval (e-3): edit_file mutates the disk, so its ToolRequest carries
+// `confirmAlwaysAllow` (set in createEditFileTool), flipping Theia's
+// ToolConfirmationManager into CONFIRM mode. Every call raises the ArsChat
+// approval card and only runs after the user allows it. See
+// arschat-chat-widget.tsx (tool call cards) and BUILD_NOTES.md.
 // *****************************************************************************
 
 import { inject, injectable } from '@theia/core/shared/inversify';

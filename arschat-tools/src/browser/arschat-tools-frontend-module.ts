@@ -22,18 +22,17 @@
 //      every request (chat-agents.js), so the model can call read/write/edit on
 //      any ArsChat send - no @tool mention required.
 //
-// ---- Approval (INTERIM, e-3 will replace this) ------------------------------
-//   Theia 1.71.2 has a ToolConfirmationMode / confirmation manager
-//   (@theia/ai-chat FrontendChatToolRequestService + chat-tool-preference-
-//   bindings). Its DEFAULT mode for a normal tool (no `confirmAlwaysAllow` flag)
-//   is ALWAYS_ALLOW, i.e. tools run WITHOUT a confirmation prompt. Our three
-//   tools deliberately omit `confirmAlwaysAllow` for e-2 so the read/write/edit
-//   path can be exercised end-to-end right now. write_file / edit_file mutating
-//   the disk unconfirmed is an e-2 stopgap ONLY; the approval UI + confirmation
-//   policy (marking the write tools confirm-required, wiring the modal) is e-3.
-//   TODO(e-3): give write_file / edit_file `confirmAlwaysAllow: true` (or a
-//   dedicated ArsChat approval flow) and stop relying on the ALWAYS_ALLOW
-//   default. See BUILD_NOTES.md "Phase 1 M5 (e-2)".
+// ---- Approval (e-3) ---------------------------------------------------------
+//   Theia 1.71.2 owns the confirmation state machine: @theia/ai-chat's
+//   FrontendChatToolRequestService.toChatToolRequest() wraps each tool handler
+//   and, when ToolConfirmationManager.getConfirmationMode() returns CONFIRM,
+//   pauses on the tool's ToolCallChatResponseContent (requestUserConfirmation() +
+//   response.fireInteractionNeeded()) until the UI calls confirm()/deny().
+//   write_file / edit_file carry `confirmAlwaysAllow` (see file-tool-requests.ts),
+//   which forces them into CONFIRM mode; read_file stays ALWAYS_ALLOW. The
+//   approval card + allow/deny + scope (once/session/forever) UI lives in our
+//   own ArschatChatWidget (arschat-chat), reusing ToolConfirmationManager for the
+//   session/forever scope so we do not re-implement state management.
 // *****************************************************************************
 
 import { ContainerModule, interfaces, injectable, inject } from '@theia/core/shared/inversify';

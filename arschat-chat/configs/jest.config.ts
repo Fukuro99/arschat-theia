@@ -14,5 +14,10 @@ export default async (): Promise<Config.InitialOptions> => ({
     moduleNameMapper: {
         '^vscode-languageserver-types': require.resolve('vscode-languageserver-types'),
         '^msgpackr': require.resolve('msgpackr'),
+        // ToolConfirmationManager (browser) transitively pulls @theia/core's browser
+        // DOM tree, which jest can't transform. The widget only needs it as a DI
+        // token, so stub it for tests (M5 e-3).
+        '@theia/ai-chat/lib/browser/chat-tool-preference-bindings':
+            '<rootDir>/configs/stubs/chat-tool-preference-bindings.js',
     }
 });
