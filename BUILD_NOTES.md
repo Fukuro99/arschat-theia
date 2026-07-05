@@ -839,3 +839,53 @@ M5 のキモは**承認フローを含めた往復**なので、単に system �
 1. **モックが handler を呼ぶ必要がある**: 最初「モックが tool_calls を流せば agent がツールを実行してくれる」と考えたが、`chat-agents.js` 実測で agent は content を追加するだけと判明。プロバイダアダプタ(anthropic-language-model.js)が handler を呼ぶ実装なので、モックが `request.tools` の**ラップ済み** handler を明示的に呼ぶ設計にした。ラップ済みだからこそ承認ゲートが効く(生の ToolRequest を叩くと確認を素通りしてしまう)。
 2. **承認 content の捕捉タイミング**: `onInteractionNeeded` は 1 回発火だが、購読がわずかに遅れた場合に取りこぼさないよう 100ms ポーリングのフォールバックを併設(response.content を走査し未 finished の該当 tool call を confirm/deny)。`executedBeforeConfirm` フラグで「confirm 前に handler が結果を出していないか(=承認バイパスのバグ)」も監視したが、CONFIRM ゲートが await するため正しく false のまま。
 3. **一時ファイルの absence 保証**: write allow/deny は「書かれた/書かれていない」を判定するので、前 run の残骸で偽陽性が出ないよう **`Date.now()` 付きユニーク path**(既存し得ない)を使い、`FileService.exists` で事前非存在も確認。`ArschatFileToolsService` に delete が無いので後片付けは `FileService.delete` を直接 inject(arschat-tools は既に `@theia/filesystem` 依存)。
+
+## Phase 1 M5 実装メモ (e-10: 実 LLM ライブ検証 — L1〜L5 + 「常に許可」の実測)
+
+作成: 2026-07-05 / 対象: PHASE1_DESIGN.md §9 M5(e-10)。e-7 のオフライン autotest 基盤(モックモデル駆動)を**ライブ化**し、**LAN の LM Studio(OpenAI 互換)に対しモック無しの実チャット往復**で M5 のツール実行・承認フローを裏取りした。追加は autotest 1 ファイル(`arschat-tools/src/browser/arschat-m5-live-contribution.ts`)+ frontend module bind 2 行 + `arschat-tools/package.json` に `arschat-providers` 依存明示のみ。**本番挙動には一切影響しない no-op ガード**(`ARSCHAT_M5_LIVE=1` の時だけ動く)。Theia 本体無改変。
+
+### 接続先と起動
+
+- エンドポイント: `http://192.168.1.149:1234/v1`(既定、`ARSCHAT_M5_LIVE_URL` で上書き可)/ モデル: `qwen/qwen3.6-35b-a3b`(既定、`ARSCHAT_M5_LIVE_MODEL` で上書き可)。ハードコードは既定値のみ。
+- 事前確認: `curl /v1/models` で到達確認、`curl /v1/chat/completions` に read_file ツール定義を渡して `finish_reason=tool_calls` + 正しい引数を実証(reasoning モデルなので応答に数十秒。タイムアウトは 1 シナリオ 5 分、シナリオごと最大 3 リトライ)。
+- 起動: `THEIA_CONFIG_DIR=<一時dir> ARSCHAT_M5_LIVE=1 ARSCHAT_M5_LIVE_URL=… ARSCHAT_M5_LIVE_MODEL=… node @theia/cli start`。frontend `onStart` が t+15s で発火して L1〜L5 を実行、`[M5-LIVE]` プレフィックスで stdout に PASS/FAIL/実測値、最後に SUMMARY。
+
+### プロバイダ切替(e-7 との違いと ハマり)
+
+- e-7 はモック LanguageModel を登録して agent をそこに向けたが、e-10 は**実 `lmstudio` エンドポイントを LAN に向け替える**: `customOpenAiModels` の `lmstudio` エントリの url/model を書き換えると `@theia/ai-openai` の `onPreferenceChanged` が `lmstudio` LanguageModel を**再登録**する(`total models=13`, `registered=true` を確認)。
+- **ハマり(初回 run で SETUP FAILED)**: 最初 `ProviderSwitchService.setActive('lmstudio')` で切替えようとしたら `Unable to write to Workspace Settings` で失敗。原因は `setActive`→`preferenceService.set(PREF_ACTIVE_PROVIDER, …, undefined)` の**スコープ `undefined` が Workspace 解決**になり、**フォルダ未オープンの headless 起動では Workspace 設定に書けない**ため。→ 回避: agent の model requirement を **`AISettingsService.updateAgentSettings`+agent instance field** で直接駆動(ProviderSwitchService 自身が §10 で belt-and-suspenders として документ化している経路、e-7 の `pointAgentAtMock` と同じ)。preference 書込は全部 **`PreferenceScope.User` 明示**にした(endpoint 書換・復元とも)。
+
+### シナリオ結果(実機ログ、SUMMARY: 4 PASS / 0 FAIL + L4 計測)
+
+- **L1 read**: 一時ファイルに合言葉 `PURPLE-OTTER-<ts>` を仕込み「このファイルを read_file で読んで合言葉を教えて」→ **応答に合言葉が含まれる** → **PASS**(1発)。実 LLM が実際に read_file を呼び、read は ALWAYS_ALLOW なので無確認で走ることを実証。
+- **L2 write 承認→実行**: 「hello-live と書いて」→ **承認待ちに入る(この時点でファイル未作成を確認)**→ `confirm()` → **実ファイルが書かれ内容 `hello-live` を確認** → **PASS**。
+- **L3 write 拒否**: 別パスに write を頼み `deny()` → **ファイル未作成 + 応答が拒否を言及** → **PASS(2発目)**。**1発目は LLM がツールを呼ばずに失敗**: 「指定パスはあなたのローカル Windows マシンのパスで、私のサーバー環境からは直接アクセスできない」と判断し write_file を呼ばず自前で断った(reasoning モデルらしい自己判断)。リトライで write_file を呼び、deny が効いて denial(`M5-LIVE programmatic denial`)が応答に反映された。
+- **L5 run_command**: 「echo live-test を実行して」→ 承認待ち → `confirm()` → **exit0 + stdout(`live-test`)が応答に反映** → **PASS(2発目)**。1発目は非決定的タイミングで、モデルが実往復の承認登録より先に「実行しました」応答を確定してしまい `confirmationRequested=false` になった(stdout マーカーは出ていた)。リトライで承認ゲート込みでクリーンに通った。
+- **L4「常に許可」の実測(最重要・レビュー未確証点)**: L2 の後、widget の `onToolAllow('forever')` と**同一経路**で `ToolConfirmationManager.setConfirmationMode('write_file', ALWAYS_ALLOW)` を実行 → もう一度 write を依頼 → **`confirmationRequestedAgain=true`(= RE-CONFIRMED)**。**「常に許可/forever」ボタンは write 系では効かず、毎回再確認される**。
+
+### L4 の意味(仕様バグの実証 — node_modules 実測と一致)
+
+`@theia/ai-chat` の `ToolConfirmationManager` を読むと理由が確定する:
+
+1. widget の `onToolAllow('forever')`(`arschat-chat-widget.tsx:594`)は `setConfirmationMode(toolId, ALWAYS_ALLOW)` を **ToolRequest 引数なし**で呼ぶ。
+2. `setConfirmationMode`(引数なし)は `effectiveDefault = defaultPref[toolId] ?? starMode`(starMode の既定は ALWAYS_ALLOW)を計算 → `mode(ALWAYS_ALLOW) === effectiveDefault(ALWAYS_ALLOW)` が **true** → 「既定に戻す」とみなして `toolConfirmation['write_file']` **キーを削除**(=保存しない)。実機ログでも `stored toolConfirmation['write_file']=<absent — key was deleted>` を確認。
+3. 一方、実行経路の `FrontendChatToolRequestService.toChatToolRequest` は `getConfirmationMode(id, sessionId, **toolRequest**)` を **ToolRequest 付き**で呼ぶ。キーは削除済みなので既定にフォールバックし、`toolRequest.confirmAlwaysAllow ? CONFIRM : ALWAYS_ALLOW` → **CONFIRM** を返す → 再確認。
+
+**結論**: `confirmAlwaysAllow` を付けた write_file/edit_file に対し、現状の widget 経由「常に許可」は**構造的に無効**(セキュリティ的には安全側=常に確認だが、UX としては「常に許可」が効かない仕様バグ)。**修正案**(M6 以降): widget が (a) `setConfirmationMode(id, mode, toolRequest)` に ToolRequest を渡して `effectiveDefault` を CONFIRM 側に寄せる、または (b) `confirmAlwaysAllow` 系専用の格納経路を用意する。**この判断のために e-10 は L4 を PASS/FAIL 対象外の「実測」として記録**(RE-CONFIRMED / RAN-WITHOUT-CONFIRMATION のどちらでも FAIL にしない)。なお `setSessionConfirmationMode`(「このセッション中」)は別 Map に直接格納するので此の削除ロジックの影響を受けず効くと推定(e-10 では未計測)。
+
+### 分離(普段の設定を汚さない)
+
+- **`THEIA_CONFIG_DIR` を一時ディレクトリに向けて起動**(実ログ `Configuration directory URI: '…/scratchpad/theia-config-m5live2'`)。preference 書込・scratch ファイル(read/write の 3 種)はすべてそこに閉じる。scratch は `FileService.delete` で後片付け。
+- 追加の belt-and-suspenders として、変更した 2 preference(`customOpenAiModels` / `toolConfirmation`)を run 前に snapshot し**実行後に復元**(実ログ `restored preferences … to pre-run values`)。
+- **旧アプリ DATA(`%APPDATA%\ArsChat\arschat-data`: mcp-config.json / sessions / settings.json 等)は無改変を確認**(全 mtime が run 前)。※`%APPDATA%\ArsChat` 直下の `GPUCache`/`Session Storage`/`Preferences` 等は Electron/Chromium が **アプリ名 "ArsChat" の userData** として起動ごとに書く**ランタイムキャッシュ**で、旧アプリのデータ本体とは別物(e-7 等の過去 run でも生成される)。
+
+### 検証(jest + ビルド)
+
+- **jest**: arschat-tools **70/70 PASS**(2 web smoke は既定 skip、e-10 は実機ログ検証なので jest 追加なし・回帰なし)。
+- **ビルド**: `../node_modules/.bin/tsc -p arschat-tools` エラー0、`yarn build:electron` webpack `compiled successfully`。**通常起動(`ARSCHAT_M5_LIVE` 未設定)では `[M5-LIVE]` ログは一切出ず**(no-op ガード確認)。
+
+### ハマった点(e-10 固有)
+
+1. **headless の Workspace スコープ書込不可**(上記): `ProviderSwitchService.setActive` を使わず AISettingsService 直接駆動 + `PreferenceScope.User` 明示で回避。
+2. **reasoning モデルの非決定性**: L3(モデルが自己判断でツールを呼ばない)/L5(承認登録前に応答確定)が 1 発目で外れることがあり、**3 リトライ**で吸収。**ツール呼び出し自体は安定**(合言葉読取・書込・拒否・コマンド実行はすべて実 LLM 経由で機能)。プロンプトはツール名を明示(「read_file ツールで」「write_file ツールで」)して呼び出しを誘導した。
+3. **`content.id` の型**: `ToolCallChatResponseContent.id` が `string | undefined` 型だったので、重複発火防止の dedup キーは `content.id ?? content.name ?? '<unknown>'` にフォールバック。

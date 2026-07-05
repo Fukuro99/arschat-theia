@@ -55,6 +55,7 @@ import { CommandRunnerService, commandRunnerServicePath } from '../common/comman
 import { WebFetchService, webFetchServicePath } from '../common/web-fetch-protocol';
 import { ArschatMCPImportContribution } from './mcp-import-contribution';
 import { ArschatM5AutotestContribution } from './arschat-m5-autotest-contribution';
+import { ArschatM5LiveContribution } from './arschat-m5-live-contribution';
 
 @injectable()
 export class ArschatToolsRegistrationContribution implements FrontendApplicationContribution {
@@ -125,6 +126,14 @@ export function bindArschatTools(bind: interfaces.Bind): void {
     // write/edit approval (allow/deny) + run_command + MCP import dry-run.
     bind(ArschatM5AutotestContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatM5AutotestContribution);
+
+    // M5 e-10 LIVE verification (no-op unless ARSCHAT_M5_LIVE=1): repoints the
+    // shared `lmstudio` endpoint at a LAN LM Studio (OpenAI-compatible), switches
+    // the ArsChat agent to it, and runs L1..L5 (read / write allow / write deny /
+    // always-allow measurement / run_command) against a REAL LLM through the real
+    // ChatService + confirmation gate. Restores mutated preferences afterwards.
+    bind(ArschatM5LiveContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM5LiveContribution);
 }
 
 export default new ContainerModule(bind => {
