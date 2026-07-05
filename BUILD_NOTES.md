@@ -789,3 +789,53 @@ M3 のモック LanguageModel 方式を流用し、**モックが受け取った
 
 - 変換先に `type` 判別子が無いのは最初直感に反したが、`isLocalMCPServerDescription`/`isRemoteMCPServerDescription` が `command`/`serverUrl` の有無だけで分岐しているのを実ソースで確認して確信。http と streamable-http を 1 表現に統合できるのはこのおかげ(SSE フォールバックまで Theia 側が持つ)。
 - jest テストで local 値に対し `.serverUrl` の非存在を assert する際、`TheiaLocalMCPServerValue as TheiaRemoteMCPServerValue` の直キャストは TS2352(重なり不足)。`as unknown as Record<string, unknown>` 経由に。
+
+## Phase 1 M5 実装メモ (e-7: ARSCHAT_M5_AUTOTEST の自動検証整備 + M3/M4 回帰)
+
+作成: 2026-07-05 / 対象: PHASE1_DESIGN.md §9 M5(e-7)。M2〜M4 で確立した**ログベース autotest の作法**(環境変数フラグ + モック LanguageModel + `[Mx]` プレフィックスで PASS/FAIL を stdout 判定)を踏襲し、M5(ツール実行 + 承認フロー + MCP インポート)の自動検証を**完全オフライン**(実 API キー・実ネットワーク不使用)で整備した。**Theia 本体は無改変**、全パッケージ 1.71.2 ピン留め維持。実装追加は autotest 1 ファイル + frontend module への bind 2 行のみ(本番挙動には一切影響しない no-op ガード)。
+
+### 置き場所の判断
+
+autotest は **`arschat-tools/src/browser/arschat-m5-autotest-contribution.ts`** に置いた(M2〜M4 は arschat-branding / arschat-agents だった)。理由: M5 の検証対象(6ツール・承認フロー・`convertLegacyMCPConfig`・`ArschatFileToolsService`・`ToolInvocationRegistry`)はすべて arschat-tools に集中しており、`ArschatChatAgent`(arschat-agents)も arschat-tools が既に依存宣言済みなので**追加の package 依存なしで全部 inject できる**。他パッケージに置くと tools → その他への逆依存が必要になる。`FrontendApplicationContribution` として frontend module に bind(既存の M4 autotest が agents module に bind しているのと同じ形)。
+
+### モックが「本物のプロバイダアダプタ」を演じる仕組み(node_modules 実測に基づく設計)
+
+M5 のキモは**承認フローを含めた往復**なので、単に system プロンプトを覗く M4 方式では足りない。Theia 実ソースを裏取りして分かった実行経路:
+
+- `AbstractStreamParsingChatAgent.addStreamResponse()`(`chat-agents.js`)は、モデルが stream で流す `tool_calls` パートを `ToolCallChatResponseContent` として response に**追加するだけ**で、**ツール handler は呼ばない**。handler を実際に叩くのは**モデルアダプタ側**(`anthropic-language-model.js` が `tool.handler(argsObject, ToolInvocationContext.create(tc.id))` を呼ぶのを確認)。
+- agent が `request.tools` に載せて渡す ToolRequest は、`FrontendChatToolRequestService.toChatToolRequest()`(browser)で**確認ゲート付きにラップ済み**。CONFIRM モードのツールは handler 内で `content.requestUserConfirmation()`+`response.fireInteractionNeeded()` を発火し `content.confirmed` を **await して実行を止める**。
+
+→ 従ってモックは「プロバイダアダプタ」を演じればよい: (1)`tool_calls` パートを yield して content を作らせ、(2)`request.tools` から該当ツールの**ラップ済み handler を自分で呼ぶ**、(3)戻りをテキストで yield。confirm 必須ツール(write/edit/run_command)では (2) がブロックするので、autotest 側が response の `onInteractionNeeded`(+ フォールバックの content ポーリング)で該当 `ToolCallChatResponseContent` を捕まえて `confirm()`/`deny()` をプログラム発火する(e-3 の widget test が `ToolCallChatResponseContentImpl` 実体を手で駆動するのと同じ方式を、実 agent 往復に載せた形)。
+
+### 検証シナリオ(5本)と結果(実機ログ、ARSCHAT_M5_AUTOTEST=1)
+
+**実 Electron シェルがこの run では描画され**(M4 と同様、M3 の描画不安定は解消)、frontend `onStart` が t+15s で発火して全シナリオ実行:
+
+- **(1) ツール登録**: `ToolInvocationRegistry` に 6 ツール(read/write/edit_file・run_command・web_search・fetch_page)が登録され、`ArschatChatAgent.additionalToolRequests` にも 6 件全部載る(`registry=6/6 onAgent=6/6`)→ **PASS**。
+- **(2) read_file 実行経路**: `${configDir}/arschat/m5-autotest/` に一時ファイルを直接シード(`ArschatFileToolsService.writeFile`、ツール経由ではなく)→ モックが read_file を tool call → ファイル内容(マーカー含む)が tool result で返る、かつ **read は ALWAYS_ALLOW なので承認不要で走る**(`resolved=true contentReturned=true ranWithoutConfirmation=true`)→ **PASS**。
+- **(3a) write_file 承認(許可)**: ユニーク path(既存し得ない)に write_file → **承認待ち状態に入る**(`enteredConfirmState=true`)・**confirm 前に実行されていない**(`notExecutedBeforeConfirm=true`)・`confirm()` 後に**実ファイルが disk に書かれる**(`fileWrittenAfterConfirm=true`)→ **PASS**。
+- **(3b) write_file 承認(拒否)**: 別のユニーク path に write_file → 承認待ち → `deny()` → **ファイルは書かれず**(`fileNotWritten=true`)・denial result(`{denied:true,reason}`)が返る(`denialResultReturned=true`)→ **PASS**。
+- **(4) run_command 実行経路**: 無害な `echo <marker>` を run_command(confirm 必須)→ 承認待ち → confirm → **backend RPC 経由で実行**され exit code 0 + stdout(marker)が返る(`enteredConfirmState=true exitCode0=true stdoutReturned=true viaBackendRPC=true`)→ **PASS**。**完了条件「run_command が承認ダイアログ経由で実行される」をログで実証**(シナリオ3+4)。
+- **(5) MCP 変換 dry-run**: フィクスチャ JSON(stdio + streamable-http + enabled:false の3サーバー)を `convertLegacyMCPConfig` に食わせ `importedCount=3 warnings=0`(**preference 書き込みなし**)→ **PASS**。
+
+**SUMMARY: 5 PASS / 0 FAIL**。autotest は自分が作った一時ファイル(read/allow/deny 3種)を `FileService.delete` で後片付けするので disk に残さない。
+
+**web_search / fetch_page** は実ネットワークが要るため autotest では**シナリオ1の登録検証のみ**でカバー。実行系は **e-5 の jest smoke(`ARSCHAT_WEB_SMOKE=1 yarn --cwd arschat-tools test`)** が担当(実 DDG 検索 + 実ページ取得を裏取り済み)。
+
+### M3/M4 回帰(同じサンドボックスで実機再run)
+
+- **M4 回帰(ARSCHAT_M4_AUTOTEST=1)**: (a)ペルソナ切替 / (b)スキル一覧 / (c)/スキル展開送信 / (d)永続化+リロード すべて **PASS 維持**、スラッシュ補完ポップアップ `rendered=true itemCount=2` も **PASS**。m4-persona-switch.png も再取得(50KB、描画確認)。
+- **M3 回帰(ARSCHAT_M3_AUTOTEST=1)**: streaming round-trip(`complete=true hasCodeBlock=true hasThinkBlock=true`)/ persistence(session 復元可)/ restore(`requestCount=1 restoredResponseLen=260`)すべて **PASS**(この run ではシェルが描画され、M3 メモの SKIP から実機 PASS に到達)。`incrementalGrowthObserved=false` はモックの高速ストリームによる既知の非ブロッキング事象で判定条件外。
+- いずれも M5 の変更(autotest 追加 + bind 2 行)が M3/M4 を壊していないことを確認。
+
+### 検証結果(jest + ビルド)
+
+- **jest**: **arschat-tools 70/70 PASS**(e-7 は autotest = 実機ログ検証なので jest 追加はなし。既存 70 が回帰なし。web smoke 2 は既定 skip)・**chat 14/14**・**agents 11/11**(いずれも回帰なし)。
+- **ビルド**: `yarn build:electron` webpack **`compiled successfully`**、`tsc` エラー0。生成 frontend bundle(`arschat-tools_lib_browser_arschat-tools-frontend-module_js.js`)に M5 autotest モジュールが取り込まれることを確認。**通常起動(ARSCHAT_M5_AUTOTEST 未設定)では `[M5]` ログは一切出ず**(no-op ガード確認)。
+- **ライブ API 往復(実キーでの実プロバイダ経由のツールコール)**: e-2〜e-6 と同様、実キー不在のため autotest には含めず **e-10(実 API ライブ検証)に集約**。ただし承認ゲートは Theia 実ソース経路(`FrontendChatToolRequestService` → await confirmed → handler)にオフラインで実際に乗せ、read/write(allow/deny)/run_command の**実行 or 停止の両分岐を実機ログで実証済み**なので、実プロバイダに差し替えても同一経路が動く。
+
+### ハマった点
+
+1. **モックが handler を呼ぶ必要がある**: 最初「モックが tool_calls を流せば agent がツールを実行してくれる」と考えたが、`chat-agents.js` 実測で agent は content を追加するだけと判明。プロバイダアダプタ(anthropic-language-model.js)が handler を呼ぶ実装なので、モックが `request.tools` の**ラップ済み** handler を明示的に呼ぶ設計にした。ラップ済みだからこそ承認ゲートが効く(生の ToolRequest を叩くと確認を素通りしてしまう)。
+2. **承認 content の捕捉タイミング**: `onInteractionNeeded` は 1 回発火だが、購読がわずかに遅れた場合に取りこぼさないよう 100ms ポーリングのフォールバックを併設(response.content を走査し未 finished の該当 tool call を confirm/deny)。`executedBeforeConfirm` フラグで「confirm 前に handler が結果を出していないか(=承認バイパスのバグ)」も監視したが、CONFIRM ゲートが await するため正しく false のまま。
+3. **一時ファイルの absence 保証**: write allow/deny は「書かれた/書かれていない」を判定するので、前 run の残骸で偽陽性が出ないよう **`Date.now()` 付きユニーク path**(既存し得ない)を使い、`FileService.exists` で事前非存在も確認。`ArschatFileToolsService` に delete が無いので後片付けは `FileService.delete` を直接 inject(arschat-tools は既に `@theia/filesystem` 依存)。

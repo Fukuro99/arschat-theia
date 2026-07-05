@@ -54,6 +54,7 @@ import { ARSCHAT_ALL_TOOL_IDS } from '../common/tool-ids';
 import { CommandRunnerService, commandRunnerServicePath } from '../common/command-runner-protocol';
 import { WebFetchService, webFetchServicePath } from '../common/web-fetch-protocol';
 import { ArschatMCPImportContribution } from './mcp-import-contribution';
+import { ArschatM5AutotestContribution } from './arschat-m5-autotest-contribution';
 
 @injectable()
 export class ArschatToolsRegistrationContribution implements FrontendApplicationContribution {
@@ -118,6 +119,12 @@ export function bindArschatTools(bind: interfaces.Bind): void {
     // (no ToolConfirmationManager approval), registered on the command palette.
     bind(ArschatMCPImportContribution).toSelf().inSingletonScope();
     bind(CommandContribution).toService(ArschatMCPImportContribution);
+
+    // M5 e-7 autotest (no-op unless ARSCHAT_M5_AUTOTEST=1): drives the six tools
+    // through the real agent/mock round-trip and asserts registration + read +
+    // write/edit approval (allow/deny) + run_command + MCP import dry-run.
+    bind(ArschatM5AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM5AutotestContribution);
 }
 
 export default new ContainerModule(bind => {
