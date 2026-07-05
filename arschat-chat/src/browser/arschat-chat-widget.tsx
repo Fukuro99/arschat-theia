@@ -30,6 +30,8 @@ import { ToolConfirmationMode } from '@theia/ai-chat/lib/common/chat-tool-prefer
 import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-variable';
 import { AIVariableResolutionRequest } from '@theia/ai-core';
 import { LanguageModel } from '@theia/ai-core';
+import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
+import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
 import {
     ArschatProviderKind,
     PROVIDERS
@@ -117,6 +119,9 @@ export class ArschatChatWidget extends ReactWidget {
 
     @inject(ToolConfirmationManager)
     protected readonly toolConfirmationManager!: ToolConfirmationManager;
+
+    @inject(ToolInvocationRegistry)
+    protected readonly toolInvocationRegistry!: ToolInvocationRegistry;
 
     protected sessionId: string | undefined;
     /** id of the request currently being generated (for abort). */
@@ -588,10 +593,40 @@ export class ArschatChatWidget extends ReactWidget {
         return this.sessionId ?? '';
     }
 
+    /**
+     * Look up the live ToolRequest for a tool call card by its name. The card's
+     * `content.name` is the tool id (arschat-tools register with id === name, and
+     * FrontendChatToolRequestService matches on `content.name === toolRequest.id`),
+     * so ToolInvocationRegistry.getFunction(name) is the authoritative source for
+     * flags like `confirmAlwaysAllow`.
+     */
+    protected toolRequestFor(view: ToolCallView): ToolRequest | undefined {
+        const name = view.content.name;
+        return name ? this.toolInvocationRegistry.getFunction(name) : undefined;
+    }
+
+    /**
+     * Whether a tool call is for a `confirmAlwaysAllow` tool (write_file / edit_file /
+     * run_command in arschat-tools). For these, Theia 1.71.2's ToolConfirmationManager
+     * treats ALWAYS_ALLOW as the removable default and getConfirmationMode falls back to
+     * CONFIRM, so a persisted "常に許可" (setConfirmationMode ALWAYS_ALLOW) does not stick
+     * (e-18 verification, BUILD_NOTES). We therefore hide the "常に許可" button for these
+     * tools rather than show an ineffective one. "このセッション中"
+     * (setSessionConfirmationMode) is NOT subject to this: session overrides are read
+     * before the confirmAlwaysAllow fallback in getConfirmationMode, so they do stick.
+     */
+    protected isConfirmAlwaysAllowTool(view: ToolCallView): boolean {
+        return !!this.toolRequestFor(view)?.confirmAlwaysAllow;
+    }
+
     protected onToolAllow(view: ToolCallView, scope: 'once' | 'session' | 'forever'): void {
         const toolId = view.content.name;
         if (toolId && scope === 'forever') {
-            this.toolConfirmationManager.setConfirmationMode(toolId, ToolConfirmationMode.ALWAYS_ALLOW);
+            // Pass the live ToolRequest so setConfirmationMode computes the correct
+            // effective default. The button is hidden for confirmAlwaysAllow tools
+            // (see isConfirmAlwaysAllowTool), so this path only runs for tools whose
+            // ALWAYS_ALLOW override actually persists.
+            this.toolConfirmationManager.setConfirmationMode(toolId, ToolConfirmationMode.ALWAYS_ALLOW, this.toolRequestFor(view));
         } else if (toolId && scope === 'session') {
             this.toolConfirmationManager.setSessionConfirmationMode(toolId, ToolConfirmationMode.ALWAYS_ALLOW, this.confirmationChatId());
         }
@@ -931,11 +966,18 @@ export class ArschatChatWidget extends ReactWidget {
                                 title='このセッション中は毎回許可'
                                 onClick={() => this.onToolAllow(view, 'session')}
                             >セッション中</button>
-                            <button
-                                className='theia-button secondary arschat-tool-allow-forever'
-                                title='常に許可 (以後このツールは確認しない)'
-                                onClick={() => this.onToolAllow(view, 'forever')}
-                            >常に許可</button>
+                            {/* "常に許可" is only offered for tools whose persisted ALWAYS_ALLOW
+                                actually sticks. For confirmAlwaysAllow tools (write_file /
+                                edit_file / run_command) Theia 1.71.2 discards it and falls back
+                                to CONFIRM, so we hide the button instead of showing a no-op
+                                (e-18). "セッション中" stays because session overrides do stick. */}
+                            {!this.isConfirmAlwaysAllowTool(view) && (
+                                <button
+                                    className='theia-button secondary arschat-tool-allow-forever'
+                                    title='常に許可 (以後このツールは確認しない)'
+                                    onClick={() => this.onToolAllow(view, 'forever')}
+                                >常に許可</button>
+                            )}
                         </div>
                         <button
                             className='theia-button secondary arschat-tool-deny'

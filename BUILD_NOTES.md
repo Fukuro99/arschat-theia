@@ -889,3 +889,41 @@ M5 のキモは**承認フローを含めた往復**なので、単に system �
 1. **headless の Workspace スコープ書込不可**(上記): `ProviderSwitchService.setActive` を使わず AISettingsService 直接駆動 + `PreferenceScope.User` 明示で回避。
 2. **reasoning モデルの非決定性**: L3(モデルが自己判断でツールを呼ばない)/L5(承認登録前に応答確定)が 1 発目で外れることがあり、**3 リトライ**で吸収。**ツール呼び出し自体は安定**(合言葉読取・書込・拒否・コマンド実行はすべて実 LLM 経由で機能)。プロンプトはツール名を明示(「read_file ツールで」「write_file ツールで」)して呼び出しを誘導した。
 3. **`content.id` の型**: `ToolCallChatResponseContent.id` が `string | undefined` 型だったので、重複発火防止の dedup キーは `content.id ?? content.name ?? '<unknown>'` にフォールバック。
+
+## Phase 1 M5 実装メモ (e-18: 承認カードのボタン出し分け — 「常に許可」を confirmAlwaysAllow ツールで非表示)
+
+作成: 2026-07-05 / 対象: PHASE1_DESIGN.md §9 M5(e-18)。e-10 で実測した「`confirmAlwaysAllow` 付きツールの『常に許可』が効かない仕様バグ」を UX 面で解消する。**承認フロー自体は再設計せず**、`arschat-chat-widget.tsx` の承認カードのボタン出し分けのみを直した。Theia 本体無改変。
+
+### 変更したファイル
+
+- `arschat-chat/src/browser/arschat-chat-widget.tsx`:
+  - `ToolInvocationRegistry`(`@theia/ai-core/lib/common/tool-invocation-registry`)を DI 注入。承認カードの `content.name`(= ツール id)から `getFunction(name)` で**生の `ToolRequest`** を引き、`confirmAlwaysAllow` フラグを確実な経路で判定する `toolRequestFor()` / `isConfirmAlwaysAllowTool()` を追加。
+  - `renderToolCard()`: `isConfirmAlwaysAllowTool(view)` が true のとき「常に許可」ボタンを**非表示**(無効化ではなく描画しない — 出せない選択肢を見せない)。「許可」「セッション中」「拒否」は従来どおり表示。
+  - `onToolAllow()` の forever 分岐: `setConfirmationMode(id, ALWAYS_ALLOW, this.toolRequestFor(view))` と**第3引数に ToolRequest を渡す**よう修正(渡さないと `effectiveDefault` が誤り、e-10 のバグ経路になる)。ボタンが出るのは非 confirmAlwaysAllow ツールのみなので、この経路は「ALWAYS_ALLOW が実際に永続化されるツール」に対してのみ走る。
+- `arschat-chat/src/browser/arschat-chat-widget.test.ts`: `ToolInvocationRegistry` スタブ + `setConfirmationMode`/`setSessionConfirmationMode` の呼び出し記録を追加。ボタン出し分けテスト 4 本(下記)。
+
+### id === name の裏取り(確実な経路)
+
+`ToolInvocationRegistry.getFunction(toolId)`(`tool-invocation-registry.d.ts`)が生の `ToolRequest` を返す。承認カードの `ToolCallChatResponseContent.name` は**ツール id そのもの**で、これは実行経路 `FrontendChatToolRequestService.findToolCallContent` が `content.name === toolRequest.id` でマッチングしていること、および arschat-tools が全ツールを `id === name` で登録している(`file-tool-requests.ts` 等)ことの二重で確認済み。したがって `getFunction(content.name)` は同一 ToolRequest を返す。
+
+### 「このセッション中」(setSessionConfirmationMode)の実測結果 — **有効。残す。**
+
+**結論: 「このセッション中」は confirmAlwaysAllow ツールでも効く**(「常に許可」とは別扱い)。根拠は `ToolConfirmationManager`(`node_modules/@theia/ai-chat/lib/browser/chat-tool-preference-bindings.js`)のソース経路:
+
+- `getConfirmationMode(toolId, chatId, toolRequest)` は**最初に** `sessionOverrides`(chatId→toolId→mode の in-memory Map)を見て、エントリがあれば**即 return する**(l.44-47)。`confirmAlwaysAllow` のフォールバック(l.54 の `'*'` 抑制、l.60 の既定 CONFIRM)は**その後**にしかないので、セッション override が入っていれば到達しない。
+- `setSessionConfirmationMode(toolId, mode, chatId)`(l.96-103)は `sessionOverrides` に**そのまま格納**する。「常に許可」(`setConfirmationMode`)にあった「ALWAYS_ALLOW=既定とみなしてキー削除」ロジック(l.82-87)は**通らない**。
+- 上流の `chat-tool-preference-bindings.spec.js` l.81-84「should return session override when set」が、まさにセッション override が格納値をそのまま返すことをテストしており、この順序を裏付ける。
+
+実体での empirical 確認も試みたが、`ToolConfirmationManager` は browser 層で `@theia/core` の DOM ツリーを推移 import するため、jest 単体(moduleNameMapper でスタブ済み)/素の node のどちらでも実 manager をロードできなかった(jsdom で document/Element/localStorage 等を差しても `@lumino/domutils` の初期化で落ちる)。**そのため e-18 では実 manager のライブ実行ではなく、上記のソース経路 + 上流 spec による確定的判定を採用した**(「常に許可」が壊れる理由も同じ削除ロジックのソース読解で e-10 が特定済み、実測 L4 と一致)。以上より「常に許可」= 非表示、「このセッション中」= 残す、で確定。
+
+### confirmAlwaysAllow の有無(対象ツール)
+
+- **confirmAlwaysAllow 有り(「常に許可」非表示)**: `write_file` / `edit_file`(`file-tool-requests.ts`)、`run_command`(`command-tool-request.ts`)。
+- **無し(3 ボタン維持)**: `read_file` / `web_search` / `fetch_page`。現状これらは確認自体が出ないが、ユーザーが preference で `*`=CONFIRM 等にした場合に承認カードが出る。その場合「常に許可」は実際に永続化されるので**残す**のが正しい。
+
+### 検証結果(正直に)
+
+- **jest**: arschat-chat **17/17 PASS**(e-3 の承認カードテスト 1 本を read-only/confirmAlwaysAllow の 2 ケース + セッション/forever の呼び出し検証に拡張して +3 本。既存 14 本は回帰なし)。arschat-tools **70/70 PASS**(2 web smoke は既定 skip)、arschat-agents **11/11 PASS**。回帰なし。
+- **追加テスト 4 本の要点**: (1) read-only ツールは 許可/セッション中/常に許可/拒否 の 4 択、(2) confirmAlwaysAllow ツールは「常に許可」のみ消え 3 択、(3)「セッション中」押下で `setSessionConfirmationMode(id, always_allow)` が呼ばれる、(4)「常に許可」押下で `setConfirmationMode` に**生の ToolRequest が第3引数で渡る**。
+- **ビルド**: `tsc --noEmit`(arschat-chat)エラー0、`yarn build:electron` webpack `compiled successfully`。
+- **ライブ検証**: e-18 は UI ロジックの出し分けのみで、実 LLM 往復は e-10 で実施済み(新規のライブ検証なし)。
