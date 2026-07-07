@@ -27,6 +27,11 @@ import { bindViewContribution, FrontendApplicationContribution, WidgetFactory } 
 import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
 
 import '../../src/browser/style/index.css';
+// KaTeX stylesheet + fonts for math rendering (M6 e-23). Imported here (not in
+// arschat-markdown.ts) so it is bundled by the app's webpack exactly once and the
+// jsdom unit tests - which import arschat-markdown directly - never touch it.
+// The app webpack handles the woff2/woff/ttf font URLs via asset/resource rules.
+import 'katex/dist/katex.min.css';
 
 export default new ContainerModule(bind => {
     // Shared coordination service (chat widget <-> history panel).

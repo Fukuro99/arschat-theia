@@ -293,6 +293,16 @@
     word-break: break-word;
 }
 
+/* KaTeX math (M6 e-23). KaTeX inherits currentColor, so it already picks up the
+   Theia foreground; we only constrain wide display equations to scroll inside the
+   bubble instead of forcing horizontal overflow of the whole message. */
+.arschat-markdown .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px 0;
+    margin: 8px 0;
+}
+
 .arschat-markdown p {
     margin: 0 0 8px;
 }

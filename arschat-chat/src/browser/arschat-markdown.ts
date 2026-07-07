@@ -35,6 +35,8 @@ import type { DOMPurify as DOMPurifyType } from 'dompurify';
 
 let hljs: HLJSApi | undefined;
 let DOMPurify: DOMPurifyType | undefined;
+/** marked-katex-extension factory, resolved lazily like the other deps. */
+let markedKatex: ((options?: unknown) => unknown) | undefined;
 let configured = false;
 
 /* eslint-disable @typescript-eslint/no-var-requires */
@@ -51,8 +53,29 @@ function ensureDeps(): void {
         }
         DOMPurify = instance;
     }
+    if (!markedKatex) {
+        // marked-katex-extension ships `module.exports = fn` (CJS); with no
+        // esModuleInterop we accept both the bare function and a `.default`.
+        const mod = require('marked-katex-extension') as
+            { default?: (options?: unknown) => unknown } | ((options?: unknown) => unknown);
+        markedKatex = (typeof mod === 'function' ? mod : mod.default) as (options?: unknown) => unknown;
+    }
 }
 /* eslint-enable @typescript-eslint/no-var-requires */
+
+/**
+ * Japanese LLM output frequently emits ¥ (U+00A5) or ￥ (U+FFE5, full-width) in
+ * place of the LaTeX escape `\`, because on JIS keyboards the yen sign occupies
+ * the backslash key. KaTeX only understands `\`, so - restricted to inside
+ * $...$ / $$...$$ spans so we never touch ordinary prose - we normalize them
+ * back to `\`. Mirrors the old ArsChat MessageBubble.tsx normalizeYenToBackslash.
+ */
+function normalizeYenToBackslash(text: string): string {
+    const yen = /[¥￥]/g;
+    let result = text.replace(/\$\$([\s\S]*?)\$\$/g, (_m, math: string) => `$$${math.replace(yen, '\\')}$$`);
+    result = result.replace(/\$([^$\n]+?)\$/g, (_m, math: string) => `$${math.replace(yen, '\\')}$`);
+    return result;
+}
 
 function configure(): void {
     if (configured) {
@@ -63,6 +86,14 @@ function configure(): void {
         gfm: true,
         breaks: true
     });
+    // KaTeX math: inline $...$ and block $$...$$, matching the old ArsChat
+    // MessageBubble.tsx options (throwOnError: false so a malformed expression
+    // renders as red source text instead of aborting the whole parse; output:
+    // 'html' avoids MathML so the sanitizer only ever sees <span>/class/style,
+    // which DOMPurify keeps by default).
+    if (markedKatex) {
+        marked.use(markedKatex({ throwOnError: false, output: 'html' }) as Parameters<typeof marked.use>[0]);
+    }
     // Syntax-highlight fenced code blocks. `marked` 14 uses a `walkTokens`/
     // renderer approach; we override the `code` renderer to run highlight.js and
     // emit a <pre><code class="hljs language-x"> block the CSS can style.
@@ -119,10 +150,15 @@ export function renderMarkdown(markdownText: string): string {
     }
     ensureDeps();
     configure();
-    const rawHtml = marked.parse(markdownText, { async: false }) as string;
+    const rawHtml = marked.parse(normalizeYenToBackslash(markdownText), { async: false }) as string;
     if (DOMPurify) {
+        // KaTeX (output: 'html') emits <span class=... style=... aria-hidden=...>.
+        // span/class/style/aria-hidden are in DOMPurify's default allow-list, so
+        // math survives sanitization; we list style/aria-hidden explicitly (ADD_ATTR
+        // is additive) so a future default-config change can't silently drop the
+        // inline sizing KaTeX relies on.
         return DOMPurify.sanitize(rawHtml, {
-            ADD_ATTR: ['target', 'class'],
+            ADD_ATTR: ['target', 'class', 'style', 'aria-hidden'],
             ALLOW_DATA_ATTR: false
         });
     }
