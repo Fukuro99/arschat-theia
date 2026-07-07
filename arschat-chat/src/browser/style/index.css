@@ -644,3 +644,57 @@
 .hljs-deletion { color: #ff5555; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: bold; }
+
+/* ===================== M6 e-24: hover message action bar ===================== */
+
+/* Stack the assistant bubble and its action bar in a left-aligned column so the
+   actions sit just below the bubble (not beside it). */
+.arschat-message-col {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    max-width: 85%;
+    min-width: 0;
+}
+
+.arschat-message-col .arschat-chat-message-bubble {
+    max-width: 100%;
+}
+
+.arschat-message-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin: 2px 2px 0;
+    /* Hidden until the message is hovered, matching the old ArsChat affordance. */
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+
+.arschat-chat-message-assistant:hover .arschat-message-actions,
+.arschat-message-actions:focus-within {
+    opacity: 1;
+}
+
+.arschat-message-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--theia-descriptionForeground, #9aa0a6);
+    cursor: pointer;
+}
+
+.arschat-message-action:hover {
+    background: var(--theia-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
+    color: var(--theia-foreground);
+}
+
+.arschat-message-action-delete:hover {
+    color: var(--theia-errorForeground, #c0392b);
+}

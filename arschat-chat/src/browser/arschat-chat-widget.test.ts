@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { ContainerModule, Container } from '@theia/core/shared/inversify';
 import { ArschatChatWidget } from './arschat-chat-widget';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
+import { ChatSessionStore } from '@theia/ai-chat/lib/common/chat-session-store';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
 import { ProviderSwitchService } from 'arschat-providers/lib/browser/provider-switch-service';
 import { PersonaService } from 'arschat-agents/lib/browser/persona-service';
@@ -21,11 +22,16 @@ describe('ArschatChatWidget', () => {
     let registeredTools: Map<string, ToolRequest>;
     let setConfirmationModeCalls: Array<{ toolId: string; mode: string; toolRequest: ToolRequest | undefined }>;
     let setSessionConfirmationModeCalls: Array<{ toolId: string; mode: string; chatId: string }>;
+    /** requestIds removed from the fake model by the widget's dropTurnFromModel. */
+    let removedRequestIds: string[];
+    let storeSessionsCalls: number;
 
     beforeEach(async () => {
         registeredTools = new Map<string, ToolRequest>();
         setConfirmationModeCalls = [];
         setSessionConfirmationModeCalls = [];
+        removedRequestIds = [];
+        storeSessionsCalls = 0;
         const module = new ContainerModule(bind => {
             // Minimal stubs: doInit() is async and fired from postConstruct, but render()
             // works off the widget's own fields, so a bare stub is enough for rendering.
@@ -37,7 +43,28 @@ describe('ArschatChatWidget', () => {
                 setActive: async () => undefined,
                 onDidChange: () => ({ dispose(): void { /* noop */ } })
             } as unknown as ProviderSwitchService);
-            bind(ChatService).toConstantValue({} as ChatService);
+            // Fake model whose getBranch returns a single-item root branch, so the
+            // widget's dropTurnFromModel path runs the real removeRequestFromModel
+            // (its re-link logic is unit-tested in arschat-request-tree.test.ts).
+            bind(ChatService).toConstantValue({
+                getSession: (_id: string) => ({
+                    id: 'sess-1',
+                    model: {
+                        getBranch: (requestId: string) => {
+                            removedRequestIds.push(requestId);
+                            return {
+                                items: [{ element: { id: requestId } }],
+                                activeBranchIndex: 0,
+                                previous: undefined,
+                                hierarchy: { branch: {} }
+                            };
+                        }
+                    }
+                })
+            } as unknown as ChatService);
+            bind(ChatSessionStore).toConstantValue({
+                storeSessions: async () => { storeSessionsCalls++; }
+            } as unknown as ChatSessionStore);
             bind(ChatAgentService).toConstantValue({} as ChatAgentService);
             bind(PersonaService).toConstantValue({
                 ready: async () => undefined,
@@ -205,6 +232,70 @@ describe('ArschatChatWidget', () => {
         expect(view.state).toBe('denied');
         expect(tc.finished).toBe(true);
         expect((tc.result as any).denied).toBe(true);
+    });
+
+    // ---- M6 e-24: hover message actions ----
+
+    /** Seed a finished user+assistant turn (one request id) plus the session id. */
+    function seedTurn(requestId = 'req-1') {
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'hello', requestId },
+            { id: 2, author: 'assistant', text: 'hi there', requestId, streaming: false }
+        ];
+        return asAny(widget).messages[1];
+    }
+
+    it('shows copy + 再生成 + 削除 on the last assistant message', () => {
+        seedTurn();
+        const element = render(widget.render());
+        expect(element.container.querySelector('.arschat-message-actions')).toBeTruthy();
+        expect(element.queryByTitle('コピー')).toBeTruthy();
+        expect(element.queryByTitle('再生成')).toBeTruthy();
+        expect(element.queryByTitle('削除')).toBeTruthy();
+    });
+
+    it('hides 再生成 on an older assistant message (only the newest can regenerate)', () => {
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'q1', requestId: 'r1' },
+            { id: 2, author: 'assistant', text: 'a1', requestId: 'r1', streaming: false },
+            { id: 3, author: 'user', text: 'q2', requestId: 'r2' },
+            { id: 4, author: 'assistant', text: 'a2', requestId: 'r2', streaming: false }
+        ];
+        const element = render(widget.render());
+        // one regenerate button total (only for the newest assistant)
+        expect(element.queryAllByTitle('再生成')).toHaveLength(1);
+        expect(element.queryAllByTitle('削除')).toHaveLength(2);
+    });
+
+    it('does not render actions while an assistant message is still streaming', () => {
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'q', requestId: 'r' },
+            { id: 2, author: 'assistant', text: 'partial', requestId: 'r', streaming: true }
+        ];
+        const element = render(widget.render());
+        expect(element.container.querySelector('.arschat-message-actions')).toBeFalsy();
+    });
+
+    it('copyMessage writes the message text to the clipboard and flags copied', async () => {
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.assign(navigator, { clipboard: { writeText } });
+        const assistant = seedTurn();
+        await asAny(widget).copyMessage(assistant);
+        expect(writeText).toHaveBeenCalledWith('hi there');
+        expect(assistant.copied).toBe(true);
+    });
+
+    it('deleteMessage removes the whole turn (user+assistant) and persists', async () => {
+        const assistant = seedTurn('req-1');
+        await asAny(widget).deleteMessage(assistant);
+        // both UiMessages sharing the request id are gone
+        expect(asAny(widget).messages).toHaveLength(0);
+        // the model was asked to remove that turn, then the session was stored
+        expect(removedRequestIds).toContain('req-1');
+        expect(storeSessionsCalls).toBe(1);
     });
 
 });

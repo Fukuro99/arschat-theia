@@ -24,6 +24,7 @@ import { Message } from '@theia/core/lib/browser';
 import { DisposableCollection } from '@theia/core';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
+import { ChatSessionStore } from '@theia/ai-chat/lib/common/chat-session-store';
 import { ChatResponseModel, ChatRequestModel, ToolCallChatResponseContent } from '@theia/ai-chat/lib/common/chat-model';
 import { ToolConfirmationManager } from '@theia/ai-chat/lib/browser/chat-tool-preference-bindings';
 import { ToolConfirmationMode } from '@theia/ai-chat/lib/common/chat-tool-preferences';
@@ -44,6 +45,7 @@ import { Skill } from 'arschat-agents/lib/common/skill';
 import { renderMarkdown } from './arschat-markdown';
 import { parseThinkBlocks } from './arschat-think';
 import { ArschatChatUiService } from './arschat-chat-ui-service';
+import { removeRequestFromModel, RequestTreeModel } from './arschat-request-tree';
 
 interface PendingImage {
     /** base64 data (no data: prefix) */
@@ -79,8 +81,17 @@ interface UiMessage {
     id: number;
     author: 'user' | 'assistant';
     text: string;
+    /**
+     * Id of the backing ChatRequestModel (a "turn" = one request carrying both the
+     * user request and the assistant response). Both the user and assistant
+     * UiMessages of a turn share this id, so a hover "削除" removes the whole pair.
+     * Undefined only while a just-sent request is still being created.
+     */
+    requestId?: string;
     /** data: URLs of images attached to a user message (for re-display). */
     images?: string[];
+    /** transient "コピーしました" tick shown briefly after a successful copy. */
+    copied?: boolean;
     streaming?: boolean;
     /** open/closed state of the think block for this assistant message. */
     thinkOpen?: boolean;
@@ -104,6 +115,9 @@ export class ArschatChatWidget extends ReactWidget {
 
     @inject(ChatService)
     protected readonly chatService!: ChatService;
+
+    @inject(ChatSessionStore)
+    protected readonly chatSessionStore!: ChatSessionStore;
 
     @inject(ChatAgentService)
     protected readonly chatAgentService!: ChatAgentService;
@@ -293,9 +307,14 @@ export class ArschatChatWidget extends ReactWidget {
 
     protected appendRestoredRequest(req: ChatRequestModel): void {
         const userText = req.request.displayText ?? req.request.text ?? '';
-        this.messages.push({ id: this.nextId++, author: 'user', text: userText });
+        this.messages.push({ id: this.nextId++, author: 'user', text: userText, requestId: req.id });
         const assistantText = this.responseToText(req.response);
-        const assistant: UiMessage = { id: this.nextId++, author: 'assistant', text: assistantText, thinkOpen: false };
+        const assistant: UiMessage = {
+            id: this.nextId++, author: 'assistant', text: assistantText, thinkOpen: false,
+            requestId: req.id,
+            // Keep the live response so restored turns can still show token stats (M6 e-25).
+            response: req.response
+        };
         // Restored responses are already finished; surface their tool calls as
         // completed cards (they never re-enter the confirm state).
         this.syncToolCalls(assistant, req.response);
@@ -416,13 +435,14 @@ export class ArschatChatWidget extends ReactWidget {
         );
         const imagesForModel = [...this.pendingImages];
 
-        this.messages.push({
+        const userMessage: UiMessage = {
             id: this.nextId++,
             author: 'user',
             // Show the original slash line if we expanded, otherwise the raw text.
             text: displayText ?? text,
             images: attachedPreviews.length > 0 ? attachedPreviews : undefined
-        });
+        };
+        this.messages.push(userMessage);
         this.inputValue = '';
         this.pendingImages = [];
 
@@ -446,6 +466,10 @@ export class ArschatChatWidget extends ReactWidget {
             }
             const requestModel = await invocation.requestCompleted;
             this.inflightRequestId = requestModel.id;
+            // Bind both UiMessages of this turn to the backing request id so the
+            // hover 削除/再生成 actions can address the whole turn (M6 e-24).
+            userMessage.requestId = requestModel.id;
+            assistant.requestId = requestModel.id;
 
             const response = await invocation.responseCreated;
             assistant.response = response;
@@ -669,6 +693,102 @@ export class ArschatChatWidget extends ReactWidget {
     protected toggleThink(msg: UiMessage): void {
         msg.thinkOpen = !msg.thinkOpen;
         this.update();
+    }
+
+    // ---------------------------------------------------------------- message actions (M6 e-24)
+
+    /** Copy the message's text (assistant markdown source / user text) to the clipboard. */
+    protected async copyMessage(msg: UiMessage): Promise<void> {
+        const text = msg.text;
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            // Fallback for environments without the async clipboard API.
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch { /* noop */ }
+            document.body.removeChild(ta);
+        }
+        msg.copied = true;
+        this.update();
+        setTimeout(() => { msg.copied = false; this.update(); }, 1200);
+    }
+
+    /** True when `msg` is the newest assistant message and nothing is in flight. */
+    protected isLastAssistant(msg: UiMessage): boolean {
+        if (msg.author !== 'assistant' || this.sending) {
+            return false;
+        }
+        for (let i = this.messages.length - 1; i >= 0; i--) {
+            if (this.messages[i].author === 'assistant') {
+                return this.messages[i].id === msg.id;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Regenerate the last assistant answer: drop its turn (user+assistant) from
+     * both the model and the UI, then resend the same user text through the normal
+     * send pipeline (re-applying skill expansion, matching the old ArsChat "再生成").
+     * The subsequent send auto-saves the model, persisting the drop (M6 e-24).
+     */
+    protected async regenerate(msg: UiMessage): Promise<void> {
+        if (!this.isLastAssistant(msg) || !msg.requestId) {
+            return;
+        }
+        const userMsg = this.messages.find(m => m.author === 'user' && m.requestId === msg.requestId);
+        const userText = userMsg?.text;
+        if (!userText) {
+            return;
+        }
+        this.dropTurnFromModel(msg.requestId);
+        this.messages = this.messages.filter(m => m.requestId !== msg.requestId);
+        this.inputValue = userText;
+        await this.send();
+    }
+
+    /** Delete a whole turn (user+assistant) from the session and persist the change. */
+    protected async deleteMessage(msg: UiMessage): Promise<void> {
+        if (this.sending || !msg.requestId) {
+            return;
+        }
+        const requestId = msg.requestId;
+        this.dropTurnFromModel(requestId);
+        this.messages = this.messages.filter(m => m.requestId !== requestId);
+        this.update();
+        await this.persistCurrentSession();
+        this.uiService.notifySessionsMutated();
+    }
+
+    /** Remove a turn from the live ChatModel's request hierarchy (no persistence). */
+    protected dropTurnFromModel(requestId: string): void {
+        if (!this.sessionId) {
+            return;
+        }
+        const session = this.chatService.getSession(this.sessionId);
+        if (session) {
+            removeRequestFromModel(session.model as unknown as RequestTreeModel, requestId);
+        }
+    }
+
+    /**
+     * Persist the current session's (mutated) model to the chat session store.
+     * Theia's auto-save fires on model onDidChange; a manual request-tree edit does
+     * not, so we store explicitly after a delete.
+     */
+    protected async persistCurrentSession(): Promise<void> {
+        if (!this.sessionId) {
+            return;
+        }
+        const session = this.chatService.getSession(this.sessionId);
+        if (session) {
+            await this.chatSessionStore.storeSessions(session.model).catch(() => { /* noop */ });
+        }
     }
 
     // ---------------------------------------------------------------- slash completion (M4)
@@ -899,6 +1019,7 @@ export class ArschatChatWidget extends ReactWidget {
         const html = renderMarkdown(response);
         return (
             <div key={msg.id} className='arschat-chat-message arschat-chat-message-assistant'>
+                <div className='arschat-message-col'>
                 <div className='arschat-chat-message-bubble'>
                     {isThinkingInProgress && (
                         <div className='arschat-think-block'>
@@ -932,6 +1053,62 @@ export class ArschatChatWidget extends ReactWidget {
                     )}
                     {msg.streaming && <span className='arschat-chat-cursor'> ▍</span>}
                 </div>
+                {!msg.streaming && msg.requestId && this.renderMessageActions(msg)}
+                </div>
+            </div>
+        );
+    }
+
+    /**
+     * Hover action bar under an assistant message (M6 e-24). Copy is always
+     * available; 再生成 only on the newest assistant answer; 削除 removes the whole
+     * turn. Visibility is CSS-driven (fade in on message hover) to match the old
+     * ArsChat MessageBubble.tsx affordance.
+     */
+    protected renderMessageActions(msg: UiMessage): React.ReactElement {
+        const canRegenerate = this.isLastAssistant(msg);
+        return (
+            <div className='arschat-message-actions'>
+                <button
+                    className='arschat-message-action'
+                    title={msg.copied ? 'コピーしました' : 'コピー'}
+                    onClick={() => this.copyMessage(msg)}
+                >
+                    {msg.copied ? (
+                        <svg width='12' height='12' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                            <path d='M3 8l3.5 3.5L13 4' stroke='var(--theia-successBackground, #22c55e)'
+                                strokeWidth='1.8' strokeLinecap='round' strokeLinejoin='round' />
+                        </svg>
+                    ) : (
+                        <svg width='12' height='12' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                            <rect x='5' y='4' width='8' height='10' rx='1.5' stroke='currentColor' strokeWidth='1.2' />
+                            <path d='M5 3.5V3A1.5 1.5 0 0 0 3.5 1.5h0A1.5 1.5 0 0 0 2 3v8A1.5 1.5 0 0 0 3.5 12.5H5'
+                                stroke='currentColor' strokeWidth='1.2' />
+                        </svg>
+                    )}
+                </button>
+                {canRegenerate && (
+                    <button
+                        className='arschat-message-action'
+                        title='再生成'
+                        onClick={() => this.regenerate(msg)}
+                    >
+                        <svg width='12' height='12' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                            <path d='M13 2.5A6 6 0 1 0 14 8' stroke='currentColor' strokeWidth='1.3' strokeLinecap='round' />
+                            <path d='M14 2.5v3h-3' stroke='currentColor' strokeWidth='1.3' strokeLinecap='round' strokeLinejoin='round' />
+                        </svg>
+                    </button>
+                )}
+                <button
+                    className='arschat-message-action arschat-message-action-delete'
+                    title='削除'
+                    onClick={() => this.deleteMessage(msg)}
+                >
+                    <svg width='12' height='12' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                        <path d='M3 4.5h10M6 4.5V3h4v1.5M5.5 4.5l.5 8h4l.5-8'
+                            stroke='currentColor' strokeWidth='1.2' strokeLinecap='round' strokeLinejoin='round' />
+                    </svg>
+                </button>
             </div>
         );
     }
