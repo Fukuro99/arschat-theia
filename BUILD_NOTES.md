@@ -927,3 +927,64 @@ M5 のキモは**承認フローを含めた往復**なので、単に system �
 - **追加テスト 4 本の要点**: (1) read-only ツールは 許可/セッション中/常に許可/拒否 の 4 択、(2) confirmAlwaysAllow ツールは「常に許可」のみ消え 3 択、(3)「セッション中」押下で `setSessionConfirmationMode(id, always_allow)` が呼ばれる、(4)「常に許可」押下で `setConfirmationMode` に**生の ToolRequest が第3引数で渡る**。
 - **ビルド**: `tsc --noEmit`(arschat-chat)エラー0、`yarn build:electron` webpack `compiled successfully`。
 - **ライブ検証**: e-18 は UI ロジックの出し分けのみで、実 LLM 往復は e-10 で実施済み(新規のライブ検証なし)。
+
+## Phase 1 M6 実装メモ (e-21: IDE 再希釈 — plugin-ext 導入で復活した debug/scm 等の Filter 拡大)
+
+作成: 2026-07-08 / 対象: PHASE1_DESIGN.md §9 M6・BUILD_NOTES「PoC-3 追加した依存関係」節。M5 で `@theia/plugin-ext` / `plugin-ext-vscode` / `vsx-registry` を導入した際、推移的に約20パッケージ(scm/debug/task/test/notebook/search-in-workspace 等)が入り、PoC-2 で作った IDE 希釈(メニューフィルタ)をすり抜けて IDE 由来のメニュー(Run)・ActivityBar アイコン(SCM/デバッグ/テスト/検索/エクスプローラ/拡張)が UI に復活していた。これを再希釈して「チャットアプリの顔」(PoC-2 水準)に戻す。**Theia 本体(node_modules 配下)は一切改変していない。全パッケージ 1.71.2 ピン留め維持。**
+
+### 変更したファイル
+
+- `arschat-branding/src/browser/arschat-ide-dilution.ts`: PoC-2 の `ArschatMenuFilterContribution`(Selection/Go/Terminal を `MenuContribution` フィルタで除去)を**2 系統のフィルタに拡張**。既存の 1 クラス・1 `addFilters` 構造を維持したまま、対象クラス配列を増やし、`FrontendApplicationContribution` 用の 2 本目の `addFilters` を追加した。
+- `arschat-branding/package.json`: フィルタ対象クラスの型・実体を import するため `dependencies` に `@theia/debug` / `@theia/scm` / `@theia/test` / `@theia/search-in-workspace` / `@theia/navigator` / `@theia/vsx-registry` / `@theia/outline-view`(すべて 1.71.2)を追加。いずれも M5 で既にワークスペースに推移解決済みのため `yarn install --frozen-lockfile` が成功(= `yarn.lock` 差分ゼロ。PoC-2 の editor/monaco/terminal 追加と同じ挙動)。
+
+### 2 系統のフィルタと、それぞれ「確実に効く方」を選んだ根拠(node_modules 実測)
+
+**(1) メニューバー = `MenuContribution` フィルタ**(PoC-2 と同じ手法の拡張)
+- 現行依存で登録される**トップレベルメニュー**を `grep 'MAIN_MENU_BAR'` で全数確認: File/Edit/View/Help(`@theia/core` `CommonMenus` = `CommonFrontendContribution`、**残す**)/ Selection(`monaco` `MonacoEditorMenuContribution`)/ Go(`editor` `EditorMenuContribution`)/ **Run**(`debug` `DebugMenus.DEBUG = [...MAIN_MENU_BAR,'6_debug']` = `DebugFrontendApplicationContribution.registerMenus`)/ Terminal(`terminal` `TerminalFrontendContribution`)。
+- **plugin-ext 拡張で復活した新規トップレベルメニューは "Run"(debug)ただ 1 つ**。よって Selection/Go/Terminal に `DebugFrontendApplicationContribution` を加えるだけでメニューバーは File/Edit/View/Help の 4 つに戻る。
+- `MenuModelRegistry` にサブメニュー一括削除 API は無い(PoC-2 で確認済み)ため、`registerMenus()` が走る前に**クラスを `MenuContribution` 多重バインドから外す**のが唯一の全除去手段。ここは preference では消せない(トップレベルメニュー個別の非表示 preference は 1.71.2 に無い)ので **FilterContribution 一択**。
+- 併せて、下記(2)で ActivityBar から消す IDE ビュー系クラス(scm/test/search/navigator/vsx/outline)も `MenuContribution` フィルタに含めた。これらの `registerMenus()` は View メニュー配下に "Toggle Explorer/Source Control/Search…" のリーフ項目を足すだけなので、**ビューを隠すなら対応する Toggle 項目も消す**方が一貫する(隠したビューを指す dangling な Toggle を残さない)。
+
+**(2) 左 ActivityBar アイコン = `FrontendApplicationContribution` フィルタ**(M6 の新規手法)
+- ActivityBar アイコンの正体を特定: 各 IDE サイドビューは `AbstractViewContribution` 派生クラスで、`bindViewContribution(bind, X)` + `bind(FrontendApplicationContribution).toService(X)` の二段バインド(例: `scm-frontend-module.js:122-123`)。その `initializeLayout()` が `openView()` → `shell.addWidget(widget, { area:'left' })` を呼ぶ(`@theia/core/.../view-contribution.js:64-76`)ことで**左パネルのタブ(= ActivityBar アイコン)が生える**。
+- したがって**当該クラスを `FrontendApplicationContribution` 型からフィルタで外す**と `initializeLayout()`(と `onStart()`)が走らず、ビューが自分を ActivityBar に足さない。`grep 'initializeLayout'` で該当パッケージを全数確認し、`openView` を呼ぶ 6 クラス + outline を対象にした:
+  - `ScmContribution`(`@theia/scm/lib/browser/scm-contribution`) — Source Control
+  - `DebugFrontendApplicationContribution`(`@theia/debug/lib/browser/debug-frontend-application-contribution`) — Run and Debug(メニュー "Run" と同一クラス。両フィルタに登場)
+  - `TestViewContribution`(`@theia/test/lib/browser/view/test-view-contribution`) — Test
+  - `SearchInWorkspaceFrontendContribution`(`@theia/search-in-workspace/lib/browser/search-in-workspace-frontend-contribution`) — Search
+  - `FileNavigatorContribution`(`@theia/navigator/lib/browser/navigator-contribution`) — Explorer
+  - `VSXExtensionsContribution`(`@theia/vsx-registry/lib/browser/vsx-extensions-contribution`) — Extensions
+  - `OutlineViewContribution`(`@theia/outline-view/lib/browser/outline-view-contribution`) — Outline
+- **preference との併用について**: ActivityBar は preference では**個別ビュー単位で消せない**。`workbench.activityBar.visible:false` は ActivityBar 全体(= ArsChat 自前の履歴パネル/ペルソナ管理ビューも)を消してしまうので不採用。よってこの系統は FilterContribution が「確実に効く方」。ステータスバー(既存の `workbench.statusBar.visible:false`)のように preference が個別に効く要素は従来どおり preference のまま(electron-app/package.json)、というのが本タスクの「要素ごとに確実な方を選ぶ」判断の内訳。
+
+### notebook / ai-chat-ui / task の扱い(意図的に触っていない)
+
+- **notebook**: 依頼で「非表示」に挙がっていたが、`@theia/notebook` は**エディタ内でノートブックを描画する**contribution で、`initializeLayout`→`openView` を持たない(= 左 ActivityBar アイコンを生やさない)。`grep 'initializeLayout'` の対象外。したがって**消すべき ActivityBar 要素が存在せず、フィルタ不要**。
+- **task**: トップレベルメニューも ActivityBar ビューも登録しない(コマンド/実行基盤のみ)。UI 上の希釈対象なし。
+- **`@theia/ai-chat-ui`(標準 AI Chat ビュー)**: `AIChatContribution` も `initializeLayout`→`openView` を持つが、これは ArsChat が土台にする AI スタック側の純正ビューであり、依頼の「IDE 要素」列挙にも無い。ArsChat の主 UI は自前 `ArschatChatWidget` なので二重チャット回避の観点では隠す余地もあるが、**AI スタックの一部**であり実起動確認(e-26)前に消すのはリスクと判断し、M6 スコープ外とした(残課題として記録)。
+
+### コマンドパレットについて
+
+依頼どおり「見た目が主眼」。コマンド/キーバインディングは `CommandContribution`/`KeybindingContribution` フィルタを掛けていないので、IDE コマンド自体はコマンドパレットに残る(容易に消せるが、キーバインディング等への副作用を避け、視覚的希釈=メニューバー+ActivityBar に限定した)。必要なら同じ配列を `CommandContribution` にも `addFilters` すれば消せる。
+
+### 検証結果
+
+- **ビルド**: `npm run prepare`(lerna、全5パッケージ tsc)エラー 0(arschat-branding の新規 import 7 本含む)。`theia build --mode development` **errorsCount:0**、`theia build --mode production` **errorsCount:0**(webpack `stats.json` で確認)。※ この検証環境は worktree に node_modules が無いため `yarn install --frozen-lockfile --ignore-scripts` 後、ネイティブアドオン(ffmpeg/keytar/native-keymap/node-pty/drivelist)と electron dist をメインリポの node_modules から複製してビルドを通した(ソースは無改変、`theia rebuild:electron` の代替)。
+- **jest 回帰なし**: arschat-chat **17/17**、arschat-agents **11/11**、arschat-tools **70 passed + 2 skipped**(web smoke は既定 skip)。M5 までの数値と一致、回帰ゼロ。
+- **実起動でのメニューバー/ActivityBar 目視確認は本タスク範囲外**(別タスク e-26)。本タスクの検証範囲はビルド通過 + jest 回帰なしまで。フィルタ発火時の `[arschat-dilution] ... filtered out: <class>` ログで実機確認できるよう console.log を残した(PoC-2 の `[PoC-2] ... filtered out` 相当)。
+
+### フィルタした要素の一覧(まとめ)
+
+| 要素 | 種別 | 除去したクラス | 手法 |
+|---|---|---|---|
+| Run メニュー | メニューバー | `DebugFrontendApplicationContribution` | `MenuContribution` filter |
+| Selection / Go / Terminal | メニューバー | `MonacoEditorMenuContribution` / `EditorMenuContribution` / `TerminalFrontendContribution` | `MenuContribution` filter(PoC-2 から継続) |
+| View メニューの Toggle 項目 | メニュー | 下記 ActivityBar 7 クラス | `MenuContribution` filter |
+| Source Control | ActivityBar | `ScmContribution` | `FrontendApplicationContribution` filter |
+| Run and Debug | ActivityBar | `DebugFrontendApplicationContribution` | `FrontendApplicationContribution` filter |
+| Test | ActivityBar | `TestViewContribution` | `FrontendApplicationContribution` filter |
+| Search | ActivityBar | `SearchInWorkspaceFrontendContribution` | `FrontendApplicationContribution` filter |
+| Explorer | ActivityBar | `FileNavigatorContribution` | `FrontendApplicationContribution` filter |
+| Extensions | ActivityBar | `VSXExtensionsContribution` | `FrontendApplicationContribution` filter |
+| Outline | ActivityBar | `OutlineViewContribution` | `FrontendApplicationContribution` filter |
+| ステータスバー | ステータスバー | (クラス除去せず) | preference `workbench.statusBar.visible:false`(既存) |
