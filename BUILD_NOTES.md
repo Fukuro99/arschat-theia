@@ -988,3 +988,26 @@ M5 のキモは**承認フローを含めた往復**なので、単に system �
 | Extensions | ActivityBar | `VSXExtensionsContribution` | `FrontendApplicationContribution` filter |
 | Outline | ActivityBar | `OutlineViewContribution` | `FrontendApplicationContribution` filter |
 | ステータスバー | ステータスバー | (クラス除去せず) | preference `workbench.statusBar.visible:false`(既存) |
+
+## Phase 1 M6 計測メモ (e-22: highlight.js バンドルサイズ計測)
+
+作成: 2026-07-08 / 対象: BUILD_NOTES.md「判断: markdown ライブラリ」節(M3 で `marked` + `highlight.js` + DOMPurify を採用)。プロダクションバンドル内で highlight.js(192 言語フルバンドル)が占めるサイズを計測して数値で記録する。**削減・サブセット化はしない**(ユーザー判断で 192 言語維持を確定済み)。手段は webpack stats + 実 terser 最小化。
+
+### 計測対象と方法
+
+- **import 実態**: `arschat-chat/src/browser/arschat-markdown.ts` が `require('highlight.js')` = `highlight.js/lib/index.js`(**フルビルド、192 言語を全登録**)を遅延解決。サブセット(`highlight.js/lib/core` + 個別言語)ではない。**version 11.11.1**。
+- **計測手段**: `theia build --mode production --json stats-prod.json` を生成し、モジュール名に `highlight.js` を含む webpack モジュールを全抽出。加えて、バンドルされる各モジュールの実ファイルを **terser(compress + mangle、webpack production と同じ最小化)** で個別最小化して合算し、gzip 圧縮後サイズも算出。
+
+### 計測結果(数値)
+
+| 指標 | 値 |
+|---|---|
+| highlight.js version | 11.11.1(`require('highlight.js')` = フルビルド) |
+| バンドルされる hljs モジュール数 | **195**(index + core + **193 言語モジュール**) |
+| 生ソース(webpack `module.size` 合算、= 非最小化) | **1,572,519 B ≈ 1.50 MiB** |
+| terser 最小化後(compress+mangle、モジュール個別最小化の合算) | **970,249 B ≈ 948 KiB ≈ 0.93 MiB** |
+| 最小化 + gzip 後(転送/ディスク実効) | **約 300 KiB** |
+
+- webpack の `--mode development` / `--mode production` いずれの stats でも hljs の `module.size` 合算は同一(1.50 MiB。`module.size` は最小化前のソースバイト数のため)。**最小化後の実バンドル寄与が 0.93 MiB、gzip 後 約 300 KiB** というのが「プロダクションバンドル内で hljs が占めるサイズ」の実値。
+- 参考: `highlight.js/lib` 配下の言語ファイル総数は 384(全言語 + 別名/派生)だが、`lib/index.js` が実際に登録・バンドルするのは 193 言語モジュール。フルビルドでもツリーシェイクで多少絞られている(それでも全 192 言語相当が入る)。
+- **削減はしない**。本計測は「192 言語維持のコスト = プロダクションで約 0.93 MiB(minified)/ 約 300 KiB(gzip)」を可視化する目的のみ。将来サブセット化を検討する場合は `highlight.js/lib/core` + `registerLanguage()` で必要言語だけ登録する構成に切り替えれば、この 0.93 MiB の大半を削減できる(が、現状はユーザー判断で据え置き)。
