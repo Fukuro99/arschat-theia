@@ -1045,3 +1045,43 @@ M5 のキモは**承認フローを含めた往復**なので、単に system �
 - jest: chat 44/44(markdown 9・think 4・request-tree 6・message-stats 6・widget 19)、agents 11/11、tools 70 + 2 skip — 全 green。
 - `npm run prepare`(lerna tsc)成功、`theia build --mode development` webpack 5 パス全て compiled successfully(errors 0)。
 - 注意: worktree の node_modules には electron `dist/` と keytar/native-keymap/drivelist/@theia-ffmpeg の `build/Release/*.node` が入っていなかったため、メインリポジトリの node_modules から複製して theia build を通した(yarn install ではスクリプト未実行のため生成されない。新 worktree では同じ複製が必要)。
+
+## Phase 1 M6 実装メモ (e-26: 再生成バグ修正 + M6 AUTOTEST + 実機確認)
+
+作成: 2026-07-08 / 対象: M6 最終タスク。(1) レビュー指摘の軽微バグ修正、(2) `ARSCHAT_M6_AUTOTEST` 自動検証の整備、(3) 実 Electron シェルでの実機確認、(4) M3〜M5 回帰。
+
+### (1) バグ修正: 再生成による入力ドラフト消失
+
+- **症状**: `arschat-chat-widget.tsx` の `regenerate()` が `this.inputValue = userText; await this.send()` としており、`send()` が読み取り後に `inputValue` を空にするため、ユーザーが入力欄に書きかけていたドラフトが再生成クリックで失われていた。
+- **修正**: 再生成前に `const draft = this.inputValue` で退避 → 再生成対象テキストで `send()` → `finally { this.inputValue = draft; this.update(); }` で復元。send 失敗時も finally で確実に戻す。
+- **テスト**: `arschat-chat-widget.test.ts` に 1 件追加。`send()` を「inputValue を読んでクリアする」挙動でスタブし、再生成後に元ドラフトが復元されることを検証(chat 44→45)。
+
+### (2) ARSCHAT_M6_AUTOTEST(`arschat-chat/src/browser/arschat-m6-autotest-contribution.ts`)
+
+M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]` プレフィックス・t+16s 発火・PASS/FAIL SUMMARY)を踏襲。`ARSCHAT_M6_AUTOTEST=1` 時のみ動作、未設定では完全 no-op。frontend module に bind 2 行追加。検証 6 チェック(実機ログ、実 Electron シェル):
+
+- **(1) 再希釈/メニューバー**: `MenuModelRegistry.getMenu(MAIN_MENU_BAR)` の子ラベルを取得 → `File/Edit/View/Help` のみ・`Run/Selection/Go/Terminal` 無し(`labels=[File, Edit, View, Help] strays=[]`)→ **PASS**。
+- **(2) 再希釈/ActivityBar**: `ApplicationShell.getWidgets('left'|'right')` の widget id を走査 → IDE ビュー(scm/debug/test/search/explorer/extensions/outline)・純正 chat ビュー(chat-view-widget)が無く、自前ビュー 2 つ(`arschat-agents:personas`, `arschat-chat:history`)のみ(`strayIdeViews=[]`)→ **PASS**。stale レイアウト復元の検知も兼ねる。
+- **(3) ハイライト**: `renderMarkdown` を ts/python/rust のコードブロックに適用 → `class="hljs"` + `<span class="hljs-…">` トークン span を全言語で確認 → **PASS**。
+- **(4) KaTeX**: `renderMarkdown('$E=mc^2$')` / `'$$…$$'` → `class="katex"` を inline/block とも確認 → **PASS**。
+- **(5) アクションボタン**: ライブ `ArschatChatWidget`(WidgetManager 取得)にモックモデル + ArsChat agent で**実際の送信往復**を流し、完了後の実 DOM に `.arschat-message-actions` が描画され、コピーボタンクリックで `navigator.clipboard.writeText`(spy)が発火(`actionBarRendered=true copyButtonPresent=true clipboardWriteTextFired=true`)→ **PASS**。
+- **(6) 統計バー**: 同往復でモックが usage part(input 42 / output 128)を emit → `.arschat-message-stats` が実データで描画(`text='711.11 トークン/秒170 トークン0.2s'`、170=42+128)→ **PASS**。
+
+**SUMMARY: 6 PASS / 0 FAIL**(実機、3 回の起動で再現)。通常起動(`ARSCHAT_M6_AUTOTEST` 未設定)では `[M6]` ログ一切なし(no-op ガード確認)。
+
+### (3) 実機確認と入れた対処
+
+- **実機起動の下準備**: worktree の `node_modules/electron/path.txt` が**空**(メインは `electron.exe`)で `getElectronPath` が「Electron failed to install correctly」で失敗した。`dist/electron.exe` 自体は複製済みだったので path.txt をメインからコピーして解決。**新 worktree では electron dist 複製時に path.txt も要複製**。
+- **メニューバー/ActivityBar の希釈**: 起動ログの `[arschat-dilution]` フィルタ発火(`MenuContribution filtered out: DebugFrontendApplicationContribution/…/AIChatContribution` 等)+ 上記 autotest (1)(2) で、メニュー 4 項目のみ・IDE アイコン無しを実機で確認。
+- **純正 @theia/ai-chat-ui チャットビューの扱い**: オーケストレーター判断で**非表示**に決定。二重チャット回避のため `AIChatContribution` を `arschat-ide-dilution.ts` の MenuContribution + FrontendApplicationContribution 両フィルタに追加。実機で右サイドパネルに `chat-view-widget` が出ないこと(autotest (2) の `strayIdeViews=[]`)を確認。
+- **永続レイアウトの罠(e-21 申し送り)への対処**: 実機の既定 userData でも今回は stale IDE ビューは復活しなかった(ActivityBar クリーン)。ただし「新規レイアウトで自己ドックさせない」FilterContribution は**復元経路(ShellLayoutRestorer が WidgetFactory 経由で id 復元)には効かない**ため、グレースフル終了で IDE ビューが永続化された端末では蘇り得る。安全網として `arschat-stale-ide-view-cleanup.ts`(`ArschatStaleIdeViewCleanup`)を新設: `onDidInitializeLayout`(レイアウト復元後)で左右サイドパネルを走査し、IDE/純正 chat ビュー id を close+dispose(`arschat-` 接頭辞は対象外、クリーン時は no-op ログ)。**実機検証**: `ARSCHAT_M6_SEED_STALE=1` で実 `scm-view-container` をレイアウトに seed → 起動時クリーンアップが実際に除去(`removed stale IDE view … scm-view-container` / `removed 1 stray view(s)`)を実機ログで実証。seed 無しでは `no stray IDE views to remove` の no-op を確認。**注記**: 罠自体は force-kill 主体の検証環境では自然再現しない(レイアウト永続化はグレースフル終了時のみ)ため、除去経路は「実 IDE ビューをシェルに seed して除去」の形で実証した。
+
+### (4) M3〜M5 回帰
+
+- **jest**: chat **45/45**(既存 44 + 再生成ドラフト 1)、agents **11/11**、tools **70 pass + 2 skip** — 全 green、退行なし。
+- **ARSCHAT_M5_AUTOTEST(実機)**: (1)ツール登録〜(5)MCP dry-run まで **5 PASS / 0 FAIL** 維持。M6 変更(autotest 追加・希釈フィルタ拡大・stale クリーンアップ)が M5 のツール実行・承認フローを壊していないことを確認。
+- **ビルド**: `npm run prepare`(lerna tsc)成功(errorsCount 0)、`theia build --mode development` webpack 全て `compiled successfully`。
+
+### 実機確認できなかった項目
+
+- **GUI の目視スクリーンショット**: ヘッドあり Electron は起動・描画されログ検証は全て通ったが、本タスクでは electron-main 側のスクリーンショット autotest(PoC/M2〜M4 の `capturePage()` 方式)は M6 用に用意していないため、UI の画像取得は行っていない。希釈・見た目要素の合否は上記 autotest のプログラム的検証(MenuModelRegistry/ApplicationShell/実 DOM query)+ `[arschat-dilution]` ログで代替・実証した。
