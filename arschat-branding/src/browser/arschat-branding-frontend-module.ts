@@ -17,6 +17,7 @@ import { ContainerModule } from '@theia/core/shared/inversify';
 import { FilterContribution } from '@theia/core';
 import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { ArschatMenuFilterContribution } from './arschat-ide-dilution';
+import { ArschatStaleIdeViewCleanup } from './arschat-stale-ide-view-cleanup';
 import { ArschatPoc3AutotestContribution } from './arschat-poc3-autotest-contribution';
 import { ArschatPoc4AutotestContribution } from './arschat-poc4-autotest-contribution';
 
@@ -26,6 +27,11 @@ export default new ContainerModule(bind => {
     // `theia.frontend.config.preferences`, not here.
     bind(ArschatMenuFilterContribution).toSelf().inSingletonScope();
     bind(FilterContribution).toService(ArschatMenuFilterContribution);
+
+    // Stale-layout safety net: closes any diluted IDE / stock-chat side view that a
+    // persisted layout restored (the filter above only stops FRESH self-docking).
+    bind(ArschatStaleIdeViewCleanup).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatStaleIdeViewCleanup);
 
     // PoC-3: flag-gated autotest (opens the vsx-registry Extensions view,
     // logs deployed plugins, dumps ESLint problem markers).
