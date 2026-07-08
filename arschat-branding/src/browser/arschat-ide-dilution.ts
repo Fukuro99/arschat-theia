@@ -50,9 +50,10 @@
 //
 // Note: `notebook` does not contribute a left activity-bar icon (it is
 // editor-hosted; it has no `initializeLayout`->`openView`), so there is nothing
-// to filter there. The standard `@theia/ai-chat-ui` chat view is left untouched
-// as it belongs to the AI stack ArsChat builds on (our own chat widget is the
-// primary UI; hiding the stock AI chat view is intentionally out of scope here).
+// to filter there. The standard `@theia/ai-chat-ui` chat view (`AIChatContribution`,
+// docked in the right side panel) IS filtered too (M6 e-26): ArsChat's own chat
+// widget is the primary UI, so the redundant stock AI chat view is hidden to avoid
+// a confusing "double chat".
 //
 // The status bar is hidden separately, declaratively, via
 // `theia.frontend.config.preferences` (`workbench.statusBar.visible: false`) in
@@ -74,6 +75,7 @@ import { SearchInWorkspaceFrontendContribution } from '@theia/search-in-workspac
 import { FileNavigatorContribution } from '@theia/navigator/lib/browser/navigator-contribution';
 import { VSXExtensionsContribution } from '@theia/vsx-registry/lib/browser/vsx-extensions-contribution';
 import { OutlineViewContribution } from '@theia/outline-view/lib/browser/outline-view-contribution';
+import { AIChatContribution } from '@theia/ai-chat-ui/lib/browser/ai-chat-ui-contribution';
 
 /**
  * Classes whose top-level MENU-BAR entry must be removed. Each of these is a
@@ -96,7 +98,11 @@ const MENU_FILTERED: Array<new (...args: any[]) => object> = [
     SearchInWorkspaceFrontendContribution,
     FileNavigatorContribution,
     VSXExtensionsContribution,
-    OutlineViewContribution
+    OutlineViewContribution,
+    // Stock @theia/ai-chat-ui chat view: ArsChat's own chat widget is the primary
+    // UI, so the redundant stock AI chat view is hidden to avoid a "double chat"
+    // (M6 e-26, orchestrator decision). Removes its View-menu toggle entry too.
+    AIChatContribution
 ];
 
 /**
@@ -115,7 +121,8 @@ const ACTIVITY_BAR_FILTERED: Array<new (...args: any[]) => object> = [
     SearchInWorkspaceFrontendContribution, // Search
     FileNavigatorContribution,             // Explorer
     VSXExtensionsContribution,             // Extensions
-    OutlineViewContribution                // Outline
+    OutlineViewContribution,               // Outline
+    AIChatContribution                     // stock AI chat view (double-chat avoidance)
 ];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
