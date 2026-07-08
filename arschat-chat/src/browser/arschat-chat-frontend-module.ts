@@ -24,6 +24,7 @@ import { ArschatChatUiService } from './arschat-chat-ui-service';
 import { ArschatStatsStore } from './arschat-stats-store';
 import { ArschatInformationalPartRenderer } from './arschat-informational-part-renderer';
 import { ArschatM3AutotestContribution } from './arschat-m3-autotest-contribution';
+import { ArschatM6AutotestContribution } from './arschat-m6-autotest-contribution';
 import { bindViewContribution, FrontendApplicationContribution, WidgetFactory } from '@theia/core/lib/browser';
 import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
 
@@ -66,4 +67,9 @@ export default new ContainerModule(bind => {
     // M3 autotest (no-op unless ARSCHAT_M3_AUTOTEST=1).
     bind(ArschatM3AutotestContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatM3AutotestContribution);
+
+    // M6 autotest (no-op unless ARSCHAT_M6_AUTOTEST=1): verifies the M6 "見た目"
+    // features (IDE dilution, code highlight, KaTeX, message action bar, stats bar).
+    bind(ArschatM6AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM6AutotestContribution);
 });
