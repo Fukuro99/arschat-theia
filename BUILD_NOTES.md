@@ -1011,3 +1011,37 @@ M5 のキモは**承認フローを含めた往復**なので、単に system �
 - webpack の `--mode development` / `--mode production` いずれの stats でも hljs の `module.size` 合算は同一(1.50 MiB。`module.size` は最小化前のソースバイト数のため)。**最小化後の実バンドル寄与が 0.93 MiB、gzip 後 約 300 KiB** というのが「プロダクションバンドル内で hljs が占めるサイズ」の実値。
 - 参考: `highlight.js/lib` 配下の言語ファイル総数は 384(全言語 + 別名/派生)だが、`lib/index.js` が実際に登録・バンドルするのは 193 言語モジュール。フルビルドでもツリーシェイクで多少絞られている(それでも全 192 言語相当が入る)。
 - **削減はしない**。本計測は「192 言語維持のコスト = プロダクションで約 0.93 MiB(minified)/ 約 300 KiB(gzip)」を可視化する目的のみ。将来サブセット化を検討する場合は `highlight.js/lib/core` + `registerLanguage()` で必要言語だけ登録する構成に切り替えれば、この 0.93 MiB の大半を削減できる(が、現状はユーザー判断で据え置き)。
+
+## Phase 1 M6 実装メモ (e-23/e-24/e-25: 旧 ArsChat「見た目要素」3点の移植)
+
+作成: 2026-07-08 / 対象: 旧 ArsChat (`C:\Users\takep\source\ArsChat` の `MessageBubble.tsx`) にあって未移植だった見た目要素 3 点 — KaTeX 数式・ホバー時アクション・統計バー — を arschat-chat に移植した。
+
+### e-23: KaTeX 数式レンダリング
+
+- **変更**: `arschat-chat/package.json` に `katex@^0.16.38` / `marked-katex-extension@^5.1.7`(旧アプリと同 major)を追加。`arschat-markdown.ts` の遅延 require 経路(esModuleInterop 無し対策)に `marked-katex-extension` を追加し、旧実装と同じ `{ throwOnError: false, output: 'html' }` で `marked.use()`。
+- **DOMPurify の通し方**: `output: 'html'` の KaTeX 出力は `<span>` + `class`/`style`/`aria-hidden` のみで構成され、DOMPurify の既定 allow-list をそのまま通る(MathML を含む `output: 'mathml'`/`htmlAndMathml` にしなかったのはこのため)。将来の既定変更に耐えるよう `ADD_ATTR: ['style', 'aria-hidden']` を明示追加(ADD_ATTR は additive なので挙動は不変)。**ADD_TAGS は不要だった**。
+- **CSS/フォント**: `katex/dist/katex.min.css` を `arschat-chat-frontend-module.ts` で import(markdown モジュールでなくここなのは、jsdom の jest が `arschat-markdown.ts` を直接 import するため)。webpack 側は gen-webpack.config.js 既存の css ルール + `asset/resource`(woff2/woff/ttf)ルールで KaTeX フォント 60 ファイルが `lib/frontend/` にハッシュ名で出力されることを確認。
+- **円記号正規化**: 旧実装の `normalizeYenToBackslash`(JIS キーボード由来で LLM が `\` の代わりに ¥ U+00A5 / ￥ U+FFE5 を出す問題)も `$...$`/`$$...$$` 内限定で移植。
+- **表示**: `.katex-display` に `overflow-x: auto` を付け、横長数式はバブル内スクロール。
+
+### e-24: メッセージホバー時アクション (コピー/再生成/削除)
+
+- **スコープ**: 旧 6 ボタン中、現アーキで確実に意味がある **コピー・再生成・削除** のみ移植(編集/続き/分岐はセッションモデル対応が必要なため見送り)。
+- **ターン概念**: Theia ai-chat では 1 `ChatRequestModel` = user+assistant の 1 ターン。UiMessage に `requestId` を持たせ、user/assistant 両方が同一ターン id を共有する形にした(削除はターン単位)。
+- **モデルからの削除**: `MutableChatModel` は append-only で removeRequest が無い。公開 API の `getBranch(requestId)` が返す branch linked-list(`items`/`previous`/`item.next`/`hierarchy.branch`)を再リンクする `removeRequestFromModel()` を `arschat-request-tree.ts` に新設。root/中間/末尾/複数バージョン branch の全ケースを処理し、単体テストで検証。serialization (`toSerializable`) は同じリンクを辿るので、再リンク後に保存すれば削除済みターン抜きで round-trip する。
+- **永続化**: request-tree の手動編集はモデルの `onDidChange` を発火しない(= auto-save が走らない)ため、削除後に `ChatSessionStore.storeSessions(model)` を明示呼び出し。
+- **再生成**: 最新 assistant のみ。対象ターンをモデル+UI から破棄 → 直前 user テキストを `send()` に再投入(スキル展開も再適用)。後続 send の auto-save が破棄を永続化するので明示保存は不要。
+- **スタイル**: `.arschat-chat-message-assistant:hover` で opacity 0→1 のフェードイン。SVG アイコンは旧実装から流用し、色は Theia テーマ変数(`--theia-descriptionForeground` 等)に置換。
+
+### e-25: トークン数/速度/所要時間の統計バー
+
+- **usage の取得可否(調査結果)**: Theia 1.71.2 の `ChatResponseModel.tokenUsage`(`ResponseTokenUsage { inputTokens, outputTokens }`)に、`@theia/ai-anthropic`・`@theia/ai-openai` 両言語モデルが yield する usage part を `AbstractChatAgent` が `setTokenUsage()` で格納する。**`toSerializable()` にも含まれておりセッション永続化で round-trip する**(スキーマ変更不要 = 後方互換問題なし)。LM Studio / Unsloth 等 OpenAI 互換もサーバが usage を返せば同経路で取れる。
+- **フォールバック**: usage が無い(または 0/0)場合は文字数 ÷ 4 のトークン概算(`arschat-message-stats.ts`、UI 上は区別表示しない — 出典は内部フィールド `tokenSource` のみ)。
+- **所要時間**: Theia は生成時間を持たない・永続化もしないため、widget が `send()` 前後で実測し、`ArschatStatsStore`(`StorageService` = localStorage 系、key `arschat.messageStats.v1`、requestId→ms、上限 1000 件)に保存。履歴から開いたとき `getDurationMs(req.id)` で復元。**旧セッション(エントリ無し)は時間なしでトークン数のみ表示され、壊れない**(全フィールド optional 設計)。
+- **速度**: トークン/秒 = **output トークン ÷ 実測秒**(input を混ぜない。旧実装と同じ意味論)。削除したターンの duration は `forget()` で掃除。
+
+### 検証
+
+- jest: chat 44/44(markdown 9・think 4・request-tree 6・message-stats 6・widget 19)、agents 11/11、tools 70 + 2 skip — 全 green。
+- `npm run prepare`(lerna tsc)成功、`theia build --mode development` webpack 5 パス全て compiled successfully(errors 0)。
+- 注意: worktree の node_modules には electron `dist/` と keytar/native-keymap/drivelist/@theia-ffmpeg の `build/Release/*.node` が入っていなかったため、メインリポジトリの node_modules から複製して theia build を通した(yarn install ではスクリプト未実行のため生成されない。新 worktree では同じ複製が必要)。

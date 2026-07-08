@@ -8,6 +8,7 @@ import { ProviderSwitchService } from 'arschat-providers/lib/browser/provider-sw
 import { PersonaService } from 'arschat-agents/lib/browser/persona-service';
 import { SkillService } from 'arschat-agents/lib/browser/skill-service';
 import { ArschatChatUiService } from './arschat-chat-ui-service';
+import { ArschatStatsStore } from './arschat-stats-store';
 import { ToolConfirmationManager } from '@theia/ai-chat/lib/browser/chat-tool-preference-bindings';
 import { ToolCallChatResponseContentImpl } from '@theia/ai-chat/lib/common/chat-model';
 import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
@@ -25,6 +26,11 @@ describe('ArschatChatWidget', () => {
     /** requestIds removed from the fake model by the widget's dropTurnFromModel. */
     let removedRequestIds: string[];
     let storeSessionsCalls: number;
+    /** durations recorded / forgotten via the fake ArschatStatsStore (M6 e-25). */
+    let recordedDurations: Array<{ requestId: string; durationMs: number }>;
+    let forgottenRequestIds: string[];
+    /** what the fake stats store returns from getDurationMs. */
+    let storedDurations: Map<string, number>;
 
     beforeEach(async () => {
         registeredTools = new Map<string, ToolRequest>();
@@ -32,6 +38,9 @@ describe('ArschatChatWidget', () => {
         setSessionConfirmationModeCalls = [];
         removedRequestIds = [];
         storeSessionsCalls = 0;
+        recordedDurations = [];
+        forgottenRequestIds = [];
+        storedDurations = new Map<string, number>();
         const module = new ContainerModule(bind => {
             // Minimal stubs: doInit() is async and fired from postConstruct, but render()
             // works off the widget's own fields, so a bare stub is enough for rendering.
@@ -65,6 +74,12 @@ describe('ArschatChatWidget', () => {
             bind(ChatSessionStore).toConstantValue({
                 storeSessions: async () => { storeSessionsCalls++; }
             } as unknown as ChatSessionStore);
+            bind(ArschatStatsStore).toConstantValue({
+                ready: async () => undefined,
+                getDurationMs: (requestId: string) => storedDurations.get(requestId),
+                record: async (requestId: string, durationMs: number) => { recordedDurations.push({ requestId, durationMs }); },
+                forget: async (requestId: string) => { forgottenRequestIds.push(requestId); }
+            } as unknown as ArschatStatsStore);
             bind(ChatAgentService).toConstantValue({} as ChatAgentService);
             bind(PersonaService).toConstantValue({
                 ready: async () => undefined,
@@ -296,6 +311,64 @@ describe('ArschatChatWidget', () => {
         // the model was asked to remove that turn, then the session was stored
         expect(removedRequestIds).toContain('req-1');
         expect(storeSessionsCalls).toBe(1);
+        // and the recorded duration for the turn is dropped too (M6 e-25)
+        expect(forgottenRequestIds).toContain('req-1');
+    });
+
+    // ---- M6 e-25: stats bar ----
+
+    it('shows tokens/sec, token count and duration from real usage + measured duration', () => {
+        const assistant = seedTurn('req-1');
+        assistant.response = { tokenUsage: { inputTokens: 120, outputTokens: 80 } };
+        assistant.durationMs = 4000;
+        const element = render(widget.render());
+        // 80 output tokens / 4s = 20.00 tokens/sec; total = 200; 4.0s
+        expect(element.queryByText(/20\.00 トークン\/秒/)).toBeTruthy();
+        expect(element.queryByText(/200 トークン$/)).toBeTruthy();
+        expect(element.queryByText(/4\.0s/)).toBeTruthy();
+    });
+
+    it('falls back to a char-based token approximation when usage is absent', () => {
+        const assistant = seedTurn('req-1');
+        assistant.text = 'a'.repeat(400); // ~100 tokens at 4 chars/token
+        assistant.durationMs = 10_000;
+        const element = render(widget.render());
+        expect(element.queryByText(/100 トークン$/)).toBeTruthy();
+        expect(element.queryByText(/10\.00 トークン\/秒/)).toBeTruthy();
+    });
+
+    it('shows token count without speed/duration for a restored turn with no recorded duration', () => {
+        const assistant = seedTurn('req-old');
+        assistant.response = { tokenUsage: { inputTokens: 10, outputTokens: 5 } };
+        assistant.durationMs = undefined;
+        const element = render(widget.render());
+        expect(element.queryByText(/15 トークン$/)).toBeTruthy();
+        expect(element.queryByText(/トークン\/秒/)).toBeFalsy();
+    });
+
+    it('does not render a stats bar while streaming', () => {
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'q', requestId: 'r' },
+            { id: 2, author: 'assistant', text: 'partial', requestId: 'r', streaming: true, durationMs: 1000 }
+        ];
+        const element = render(widget.render());
+        expect(element.container.querySelector('.arschat-message-stats')).toBeFalsy();
+    });
+
+    it('restores the persisted duration when a session turn is re-opened from history', () => {
+        storedDurations.set('req-42', 2500);
+        const req: any = {
+            id: 'req-42',
+            request: { text: 'question', displayText: undefined },
+            response: { response: { content: [] }, tokenUsage: { inputTokens: 4, outputTokens: 6 } }
+        };
+        asAny(widget).appendRestoredRequest(req);
+        const assistant = asAny(widget).messages[1];
+        expect(assistant.durationMs).toBe(2500);
+        const element = render(widget.render());
+        expect(element.queryByText(/2\.5s/)).toBeTruthy();
+        expect(element.queryByText(/10 トークン$/)).toBeTruthy();
     });
 
 });

@@ -698,3 +698,29 @@
 .arschat-message-action-delete:hover {
     color: var(--theia-errorForeground, #c0392b);
 }
+
+/* ===================== M6 e-25: message stats bar ===================== */
+
+/* トークン/秒・トークン数・所要時間 under a finished assistant bubble, in the
+   muted small-print tone of the old ArsChat stats row. */
+.arschat-message-stats {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 12px;
+    row-gap: 2px;
+    margin: 3px 4px 0;
+    font-size: 10px;
+    color: var(--theia-descriptionForeground, #9aa0a6);
+    user-select: none;
+}
+
+.arschat-message-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.arschat-message-stat svg {
+    opacity: 0.6;
+}

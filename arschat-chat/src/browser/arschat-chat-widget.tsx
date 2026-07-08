@@ -46,6 +46,8 @@ import { renderMarkdown } from './arschat-markdown';
 import { parseThinkBlocks } from './arschat-think';
 import { ArschatChatUiService } from './arschat-chat-ui-service';
 import { removeRequestFromModel, RequestTreeModel } from './arschat-request-tree';
+import { ArschatStatsStore } from './arschat-stats-store';
+import { computeMessageStats, hasDisplayableStats, ResponseTokenUsageLike } from './arschat-message-stats';
 
 interface PendingImage {
     /** base64 data (no data: prefix) */
@@ -92,6 +94,8 @@ interface UiMessage {
     images?: string[];
     /** transient "コピーしました" tick shown briefly after a successful copy. */
     copied?: boolean;
+    /** measured generation time (ms) for an assistant message, for the stats bar (M6 e-25). */
+    durationMs?: number;
     streaming?: boolean;
     /** open/closed state of the think block for this assistant message. */
     thinkOpen?: boolean;
@@ -130,6 +134,9 @@ export class ArschatChatWidget extends ReactWidget {
 
     @inject(ArschatChatUiService)
     protected readonly uiService!: ArschatChatUiService;
+
+    @inject(ArschatStatsStore)
+    protected readonly statsStore!: ArschatStatsStore;
 
     @inject(ToolConfirmationManager)
     protected readonly toolConfirmationManager!: ToolConfirmationManager;
@@ -297,6 +304,9 @@ export class ArschatChatWidget extends ReactWidget {
         this.sessionId = session.id;
         this.messages = [];
         this.pendingImages = [];
+        // Durations are looked up synchronously in appendRestoredRequest; make sure
+        // the store's cache is loaded first (M6 e-25).
+        await this.statsStore.ready();
         for (const req of session.model.getRequests()) {
             this.appendRestoredRequest(req);
         }
@@ -312,8 +322,11 @@ export class ArschatChatWidget extends ReactWidget {
         const assistant: UiMessage = {
             id: this.nextId++, author: 'assistant', text: assistantText, thinkOpen: false,
             requestId: req.id,
-            // Keep the live response so restored turns can still show token stats (M6 e-25).
-            response: req.response
+            // Keep the live response so restored turns can still show token stats;
+            // the duration comes from our own store (old sessions without an entry
+            // simply render the bar without a time - schema is optional-safe) (M6 e-25).
+            response: req.response,
+            durationMs: this.statsStore.getDurationMs(req.id)
         };
         // Restored responses are already finished; surface their tool calls as
         // completed cards (they never re-enter the confirm state).
@@ -450,6 +463,10 @@ export class ArschatChatWidget extends ReactWidget {
         this.messages.push(assistant);
         this.update();
 
+        // Wall-clock generation time for the stats bar (M6 e-25). Theia does not
+        // persist durations, so we measure here and store per request id.
+        const startedAt = Date.now();
+
         try {
             const modelId = this.switchService.resolveActiveModelId();
             console.log(`[arschat-chat] sending request (provider='${this.provider}', model='${this.model}', persona='${this.activePersonaId}', skill=${expansion ? 'yes' : 'no'}, resolved LanguageModel id='${modelId ?? '<none>'}', images=${imagesForModel.length})`);
@@ -486,6 +503,12 @@ export class ArschatChatWidget extends ReactWidget {
             assistant.text = this.responseToText(response);
             this.syncToolCalls(assistant, response);
             assistant.streaming = false;
+            // Record the measured duration so the stats bar survives a session
+            // reload (tokenUsage is persisted by Theia; the duration is ours).
+            assistant.durationMs = Date.now() - startedAt;
+            if (assistant.requestId) {
+                this.statsStore.record(assistant.requestId, assistant.durationMs).catch(() => { /* noop */ });
+            }
         } catch (e) {
             assistant.text = `(error: ${e instanceof Error ? e.message : String(e)})`;
             assistant.streaming = false;
@@ -762,6 +785,8 @@ export class ArschatChatWidget extends ReactWidget {
         this.messages = this.messages.filter(m => m.requestId !== requestId);
         this.update();
         await this.persistCurrentSession();
+        // Drop the recorded duration too - the turn no longer exists (M6 e-25).
+        this.statsStore.forget(requestId).catch(() => { /* noop */ });
         this.uiService.notifySessionsMutated();
     }
 
@@ -1053,8 +1078,60 @@ export class ArschatChatWidget extends ReactWidget {
                     )}
                     {msg.streaming && <span className='arschat-chat-cursor'> ▍</span>}
                 </div>
+                {!msg.streaming && this.renderStatsBar(msg)}
                 {!msg.streaming && msg.requestId && this.renderMessageActions(msg)}
                 </div>
+            </div>
+        );
+    }
+
+    /**
+     * Token / speed / elapsed-time bar under a finished assistant message
+     * (M6 e-25, old ArsChat MessageBubble.tsx 485-531). Token counts come from the
+     * response's persisted tokenUsage when the provider reported usage; otherwise
+     * a char-based approximation is shown (indistinguishable in the UI by design -
+     * see arschat-message-stats.ts).
+     */
+    protected renderStatsBar(msg: UiMessage): React.ReactNode {
+        // Only real turns get a stats bar (no requestId = error placeholder etc.).
+        if (!msg.requestId) {
+            return undefined;
+        }
+        const usage = msg.response?.tokenUsage as ResponseTokenUsageLike | undefined;
+        const stats = computeMessageStats(msg.text, usage, msg.durationMs);
+        if (!hasDisplayableStats(stats)) {
+            return undefined;
+        }
+        return (
+            <div className='arschat-message-stats'>
+                {stats.tokensPerSec !== undefined && (
+                    <span className='arschat-message-stat'>
+                        <svg width='10' height='10' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                            <path d='M13.5 2.5A6.5 6.5 0 1 0 14.5 8' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' />
+                            <path d='M14.5 2.5v3h-3' stroke='currentColor' strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' />
+                        </svg>
+                        {stats.tokensPerSec.toFixed(2)} トークン/秒
+                    </span>
+                )}
+                {stats.totalTokens !== undefined && (
+                    <span className='arschat-message-stat'>
+                        <svg width='10' height='10' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                            <rect x='1' y='7' width='3' height='8' rx='0.5' fill='currentColor' />
+                            <rect x='6' y='4' width='3' height='11' rx='0.5' fill='currentColor' />
+                            <rect x='11' y='1' width='3' height='14' rx='0.5' fill='currentColor' />
+                        </svg>
+                        {stats.totalTokens} トークン
+                    </span>
+                )}
+                {stats.durationSeconds !== undefined && (
+                    <span className='arschat-message-stat'>
+                        <svg width='10' height='10' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                            <circle cx='8' cy='8' r='6.5' stroke='currentColor' strokeWidth='1.3' />
+                            <path d='M8 4.5V8l2.5 2' stroke='currentColor' strokeWidth='1.3' strokeLinecap='round' />
+                        </svg>
+                        {stats.durationSeconds.toFixed(1)}s
+                    </span>
+                )}
             </div>
         );
     }
