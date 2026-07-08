@@ -294,6 +294,24 @@ describe('ArschatChatWidget', () => {
         expect(element.container.querySelector('.arschat-message-actions')).toBeFalsy();
     });
 
+    it('regenerate preserves a half-written input draft (M6 e-26)', async () => {
+        const assistant = seedTurn('req-1');
+        // the user had started typing a new message while the last answer was on screen
+        asAny(widget).inputValue = '書きかけのドラフト';
+        let sentText: string | undefined;
+        // Stub send() to mimic the real pipeline's only relevant side effect: it reads
+        // the input as the request text, then clears it. The fix must survive this.
+        asAny(widget).send = async () => {
+            sentText = asAny(widget).inputValue;
+            asAny(widget).inputValue = '';
+        };
+        await asAny(widget).regenerate(assistant);
+        // the resend used the original user text of the turn being regenerated...
+        expect(sentText).toBe('hello');
+        // ...and the user's draft is back in the input box afterwards (not lost).
+        expect(asAny(widget).inputValue).toBe('書きかけのドラフト');
+    });
+
     it('copyMessage writes the message text to the clipboard and flags copied', async () => {
         const writeText = jest.fn().mockResolvedValue(undefined);
         Object.assign(navigator, { clipboard: { writeText } });

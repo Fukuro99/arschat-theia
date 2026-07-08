@@ -769,10 +769,20 @@ export class ArschatChatWidget extends ReactWidget {
         if (!userText) {
             return;
         }
+        // send() drives the resend off `this.inputValue` and clears it once read, so
+        // overwriting the input to carry the original user text would silently discard
+        // anything the user had started typing. Stash the draft, resend, then restore
+        // it so the input box is exactly as the user left it (M6 e-26 review fix).
+        const draft = this.inputValue;
         this.dropTurnFromModel(msg.requestId);
         this.messages = this.messages.filter(m => m.requestId !== msg.requestId);
         this.inputValue = userText;
-        await this.send();
+        try {
+            await this.send();
+        } finally {
+            this.inputValue = draft;
+            this.update();
+        }
     }
 
     /** Delete a whole turn (user+assistant) from the session and persist the change. */
