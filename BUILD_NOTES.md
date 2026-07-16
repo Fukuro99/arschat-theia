@@ -1085,3 +1085,49 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 ### 実機確認できなかった項目
 
 - **GUI の目視スクリーンショット**: ヘッドあり Electron は起動・描画されログ検証は全て通ったが、本タスクでは electron-main 側のスクリーンショット autotest(PoC/M2〜M4 の `capturePage()` 方式)は M6 用に用意していないため、UI の画像取得は行っていない。希釈・見た目要素の合否は上記 autotest のプログラム的検証(MenuModelRegistry/ApplicationShell/実 DOM query)+ `[arschat-dilution]` ログで代替・実証した。
+
+## Phase 1 MS8 実装メモ (e-39/e-40/e-41/e-42/e-43/e-44)
+
+作業日: 2026-07-17 / 対象: 会話途中の編集・続きを生成・分岐。
+
+- **e-39/e-40 編集**: `ArschatChatWidget` に `editing` / `editDraft` と `startEdit` / `cancelEdit` / `saveEdit` を追加。assistant は `ChatResponseImpl` の構造的 API (`clearContent` / `addContent`) へ `TextChatResponseContentImpl` を差し替えて `storeSessions` で明示保存。user は対象 turn 以降の requestId を `removeRequestFromModel` 経由で順に破棄し、編集後テキストを通常 `send()` パイプラインへ再投入。`regenerate` と同じく入力 draft を退避/復元する。
+- **e-41 続きを生成**: 最新 assistant のみ `続けてください` を通常 user turn として `send()` に渡す。provider 固有 continuation API は使わず、履歴にも visible turn として残す。
+- **e-42 分岐**: 対象 request までの active request slice から直線状の `SerializedChatModel` を作り、`new MutableChatModel(serialized)` → `chatSessionStore.storeSessions({ model, title })` → `loadSession(newSessionId)` → `notifySessionsMutated()` の順で新セッションへ切り替える。タイトルは `[分岐] <最初のuser発言50文字>`。
+- **UI/CSS**: hover action は assistant = copy/edit/regenerate(latest)/continue(latest)/branch/delete、user = copy/edit/branch/delete。編集 UI は message bubble 内 textarea + 保存/キャンセル、Enter 保存 / Escape キャンセル。CSS は `arschat-` prefix で既存入力欄に合わせた。
+- **e-43 Jest**: `arschat-chat-widget.test.ts` に編集 open/cancel、user 編集再送、assistant 編集保存のみ、continue 挿入、branch 生成、ボタン出し分けのテストを追加。
+- **e-44 AUTOTEST**: `arschat-m7-autotest-contribution.ts` を追加し、`ARSCHAT_M7_AUTOTEST=1` のとき `[M7]` prefix で edit / continue / branch を実 DOM から検証。`arschat-chat-frontend-module.ts` に `FrontendApplicationContribution` bind を追加。
+
+確認結果:
+
+- `yarn workspace @arschat/chat build`: workspace 名がこの repo では存在せず失敗。`arschat-chat/package.json` の実名に合わせて以降は `arschat-chat` で実行。
+- `yarn workspace arschat-chat build`: 成功。
+- `yarn workspace arschat-chat test`: 5 suites / 52 tests all green。既存の React `act(...)` warning は出るが exit code は 0。
+- lint: `arschat-chat/package.json` に lint script なし。
+
+### レビューと修正 (Codex 別セッションレビュー 2 巡)
+
+実装セッションとは別の Codex セッションでレビューを 2 巡実施し、以下を修正した (修正後 54 tests green):
+
+- **critical**: 分岐で `new MutableChatModel(serialized)` が response content を復元しないため、`storeSessions` 時に assistant 本文が空で保存される → 保存前に元 slice の live response content を request id で対応付けて再投入する `restoreBranchResponseContent` を追加。
+- **major**: user 編集で turn drop 後に `send()` が request 追加前に失敗すると drop が永続化されず再起動で後続 turn が復活 → drop 直後に `persistCurrentSession()` を明示実行。
+- **major**: M7 autotest の controlled textarea 変更が React onChange を発火しない → native setter 経由 + input event dispatch に変更。
+- **major**: 画像付き user メッセージの編集で添付画像が黙って落ちる → 元 request の `ImageContextVariable` から `PendingImage` を復元して画像付きで再送。復元不能な image variable の場合は編集ボタン自体を非表示にするガード。
+- **major**: 手動 `storeSessions` が `title` / `pinnedAgentId` を保存せず、分岐後や編集失敗パスで agent pin / タイトルが落ちる → 分岐・`persistCurrentSession` とも `{ model, title, pinnedAgentId }` 形式に統一。
+- **minor**: branch の Jest が空 content で本文消失を検出できない → 非空 text content で `toSerializable().responses[*].content` を検証するテストに強化。
+
+最終レビュー (3 巡目、修正確認): 指摘なし。
+
+### 実機確認 (e-45)
+
+実 Electron シェル (worktree ms-8-work、`npm run prepare` + `theia build --mode development` + plugins 複製) で確認:
+
+- `ARSCHAT_M7_AUTOTEST=1` 起動: **SUMMARY: 3 PASS / 0 FAIL (of 3 checks)**
+  - `[M7][autotest] edit: editedTextRendered=true editClosed=true -> PASS`
+  - `[M7][autotest] continue: promptInserted=true messageCount=4 -> PASS`
+  - `[M7][autotest] branch: before=<旧sessionId> after=<新sessionId> switched=true -> PASS`
+- 通常起動 (`ARSCHAT_M7_AUTOTEST` 未設定): `[M7]` ログ一切なし (no-op ガード確認)。`[M6]` ログもなし (M6 autotest への regression なし)。
+- Jest 最終: 5 suites / 54 tests all green。
+
+### 実機確認できなかった項目
+
+- API キーを使った実プロバイダでの編集→再生成の応答品質 (autotest はモック LanguageModel)。Theia 再起動を跨いだ分岐セッションの永続化はストア保存経路 (storeSessions → getOrRestoreSession) のユニットテストと autotest の範囲で担保し、目視の再起動確認は行っていない。
