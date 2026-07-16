@@ -25,7 +25,16 @@ import { DisposableCollection } from '@theia/core';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
 import { ChatSessionStore } from '@theia/ai-chat/lib/common/chat-session-store';
-import { ChatResponseModel, ChatRequestModel, ToolCallChatResponseContent } from '@theia/ai-chat/lib/common/chat-model';
+import type { ChatModelWithMetadata } from '@theia/ai-chat/lib/common/chat-session-store';
+import {
+    ChatResponseContent,
+    ChatResponseModel,
+    ChatRequestModel,
+    MutableChatModel,
+    TextChatResponseContentImpl,
+    ToolCallChatResponseContent
+} from '@theia/ai-chat/lib/common/chat-model';
+import { SerializedChatModel, SerializableHierarchyBranch } from '@theia/ai-chat/lib/common/chat-model-serialization';
 import { ToolConfirmationManager } from '@theia/ai-chat/lib/browser/chat-tool-preference-bindings';
 import { ToolConfirmationMode } from '@theia/ai-chat/lib/common/chat-tool-preferences';
 import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-variable';
@@ -33,6 +42,7 @@ import { AIVariableResolutionRequest } from '@theia/ai-core';
 import { LanguageModel } from '@theia/ai-core';
 import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
 import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
+import { generateUuid } from '@theia/core/lib/common/uuid';
 import {
     ArschatProviderKind,
     PROVIDERS
@@ -103,10 +113,19 @@ interface UiMessage {
     toolCalls?: ToolCallView[];
     /** the live response model backing a streaming/just-finished assistant message. */
     response?: ChatResponseModel;
+    /** whether this message is currently being edited in-place. */
+    editing?: boolean;
 }
 
 /** How much of a tool result we show before the fold (chars). */
 const TOOL_RESULT_PREVIEW_CHARS = 2000;
+const CONTINUE_PROMPT = '続けてください';
+
+interface MutableResponseContentLike {
+    clearContent(): void;
+    addContents?(contents: ChatResponseContent[]): void;
+    addContent(content: ChatResponseContent): void;
+}
 
 @injectable()
 export class ArschatChatWidget extends ReactWidget {
@@ -151,6 +170,7 @@ export class ArschatChatWidget extends ReactWidget {
     protected messages: UiMessage[] = [];
     protected nextId = 1;
     protected inputValue = '';
+    protected editDraft = '';
     protected sending = false;
     protected pendingImages: PendingImage[] = [];
     protected dragActive = false;
@@ -317,7 +337,14 @@ export class ArschatChatWidget extends ReactWidget {
 
     protected appendRestoredRequest(req: ChatRequestModel): void {
         const userText = req.request.displayText ?? req.request.text ?? '';
-        this.messages.push({ id: this.nextId++, author: 'user', text: userText, requestId: req.id });
+        const restoredImages = this.pendingImagesFromVariables(req.request.variables);
+        this.messages.push({
+            id: this.nextId++,
+            author: 'user',
+            text: userText,
+            requestId: req.id,
+            images: restoredImages && restoredImages.length > 0 ? restoredImages.map(img => img.previewUrl) : undefined
+        });
         const assistantText = this.responseToText(req.response);
         const assistant: UiMessage = {
             id: this.nextId++, author: 'assistant', text: assistantText, thinkOpen: false,
@@ -364,6 +391,72 @@ export class ArschatChatWidget extends ReactWidget {
     protected removePendingImage(index: number): void {
         this.pendingImages.splice(index, 1);
         this.update();
+    }
+
+    protected getRequestModel(requestId: string): ChatRequestModel | undefined {
+        if (!this.sessionId) {
+            return undefined;
+        }
+        return this.chatService.getSession(this.sessionId)?.model.getRequests().find(req => req.id === requestId);
+    }
+
+    /**
+     * Rebuild the widget's image-send shape from persisted ImageContextVariables.
+     * Undefined means an image variable exists but cannot be safely resent.
+     */
+    protected pendingImagesFromRequest(requestId: string): PendingImage[] | undefined {
+        const request = this.getRequestModel(requestId);
+        return request ? this.pendingImagesFromVariables(request.request.variables) : undefined;
+    }
+
+    protected pendingImagesForUserEdit(msg: UiMessage): PendingImage[] | undefined {
+        if (!msg.requestId) {
+            return undefined;
+        }
+        const request = this.getRequestModel(msg.requestId);
+        if (!request) {
+            return msg.images && msg.images.length > 0 ? undefined : [];
+        }
+        const images = this.pendingImagesFromVariables(request.request.variables);
+        return images && (!msg.images || msg.images.length === images.length) ? images : undefined;
+    }
+
+    protected pendingImagesFromVariables(variables: readonly AIVariableResolutionRequest[] | undefined): PendingImage[] | undefined {
+        const images: PendingImage[] = [];
+        for (const variable of variables ?? []) {
+            if (!ImageContextVariable.isImageContextRequest(variable)) {
+                continue;
+            }
+            let parsed: ImageContextVariable | undefined;
+            try {
+                parsed = ImageContextVariable.parseRequest(variable);
+            } catch {
+                return undefined;
+            }
+            if (!parsed) {
+                continue;
+            }
+            if (!parsed.data || !parsed.mimeType) {
+                return undefined;
+            }
+            images.push({
+                data: parsed.data,
+                mimeType: parsed.mimeType,
+                name: parsed.name ?? 'image',
+                previewUrl: `data:${parsed.mimeType};base64,${parsed.data}`
+            });
+        }
+        return images;
+    }
+
+    protected canEditMessage(msg: UiMessage): boolean {
+        if (msg.author !== 'user') {
+            return true;
+        }
+        if (!msg.requestId) {
+            return false;
+        }
+        return this.pendingImagesForUserEdit(msg) !== undefined;
     }
 
     protected async handlePaste(event: React.ClipboardEvent): Promise<void> {
@@ -785,6 +878,198 @@ export class ArschatChatWidget extends ReactWidget {
         }
     }
 
+    /** Enter in-place edit mode for one message. */
+    protected startEdit(msg: UiMessage): void {
+        if (this.sending || msg.streaming) {
+            return;
+        }
+        for (const m of this.messages) {
+            m.editing = false;
+        }
+        msg.editing = true;
+        this.editDraft = msg.text;
+        this.update();
+        setTimeout(() => {
+            const ta = document.getElementById(`arschat-message-edit-${msg.id}`) as HTMLTextAreaElement | null;
+            if (ta) {
+                ta.focus();
+                ta.setSelectionRange(ta.value.length, ta.value.length);
+            }
+        }, 0);
+    }
+
+    /** Leave edit mode without mutating the message/model. */
+    protected cancelEdit(msg: UiMessage): void {
+        msg.editing = false;
+        this.editDraft = '';
+        this.update();
+    }
+
+    /** Save an edit, using the asymmetric user/assistant behavior required by ms-8. */
+    protected async saveEdit(msg: UiMessage): Promise<void> {
+        const newText = this.editDraft;
+        if (msg.author === 'user') {
+            await this.saveUserEdit(msg, newText);
+        } else {
+            await this.saveAssistantEdit(msg, newText);
+        }
+    }
+
+    /**
+     * User edit: drop the edited turn and every following turn, then resend the
+     * edited text through the normal send pipeline. The user's current input draft
+     * is restored after send(), matching regenerate's draft-preservation behavior.
+     */
+    protected async saveUserEdit(msg: UiMessage, newText: string): Promise<void> {
+        if (!msg.requestId || this.sending || newText.trim().length === 0) {
+            return;
+        }
+        const draft = this.inputValue;
+        const pendingImageDraft = [...this.pendingImages];
+        const imagesToResend = this.pendingImagesForUserEdit(msg);
+        if (!imagesToResend) {
+            return;
+        }
+        const idx = this.messages.findIndex(m => m.id === msg.id);
+        if (idx < 0) {
+            return;
+        }
+        const trailingRequestIds = Array.from(new Set(
+            this.messages.slice(idx).map(m => m.requestId).filter((id): id is string => !!id)
+        ));
+        for (const id of trailingRequestIds) {
+            this.dropTurnFromModel(id);
+            this.statsStore.forget(id).catch(() => { /* noop */ });
+        }
+        await this.persistCurrentSession();
+        this.messages = this.messages.filter(m => !trailingRequestIds.includes(m.requestId ?? ''));
+        this.editDraft = '';
+        this.inputValue = newText;
+        this.pendingImages = imagesToResend;
+        try {
+            await this.send();
+        } finally {
+            this.inputValue = draft;
+            this.pendingImages = pendingImageDraft;
+            this.update();
+        }
+    }
+
+    /** Assistant edit: replace only the assistant response content and persist. */
+    protected async saveAssistantEdit(msg: UiMessage, newText: string): Promise<void> {
+        if (!msg.response || msg.streaming) {
+            return;
+        }
+        const mutable = msg.response.response as unknown as MutableResponseContentLike;
+        mutable.clearContent();
+        mutable.addContent(new TextChatResponseContentImpl(newText));
+        msg.text = newText;
+        msg.editing = false;
+        this.editDraft = '';
+        this.syncToolCalls(msg, msg.response);
+        this.update();
+        await this.persistCurrentSession();
+        this.uiService.notifySessionsMutated();
+    }
+
+    /**
+     * Continue generation by inserting the explicit follow-up user turn through the
+     * regular send path. This is intentionally provider-agnostic and persists as a
+     * normal visible turn.
+     */
+    protected async continueMessage(msg: UiMessage): Promise<void> {
+        if (!this.isLastAssistant(msg)) {
+            return;
+        }
+        const draft = this.inputValue;
+        this.inputValue = CONTINUE_PROMPT;
+        try {
+            await this.send();
+        } finally {
+            this.inputValue = draft;
+            this.update();
+        }
+    }
+
+    /** Create a new persisted session containing the active request slice up to msg. */
+    protected async branchMessage(msg: UiMessage): Promise<void> {
+        if (!this.sessionId || !msg.requestId || this.sending) {
+            return;
+        }
+        const session = this.chatService.getSession(this.sessionId);
+        if (!session) {
+            return;
+        }
+        const requests = session.model.getRequests();
+        const idx = requests.findIndex(req => req.id === msg.requestId);
+        if (idx < 0) {
+            return;
+        }
+        const slice = requests.slice(0, idx + 1);
+        if (slice.length === 0) {
+            return;
+        }
+
+        const branches: { [branchId: string]: SerializableHierarchyBranch } = {};
+        let rootBranchId: string | undefined;
+        let prevBranchId: string | undefined;
+        for (const req of slice) {
+            const branchId = `${req.id}-branch`;
+            branches[branchId] = { id: branchId, items: [{ requestId: req.id }], activeBranchIndex: 0 };
+            if (prevBranchId) {
+                branches[prevBranchId].items[0].nextBranchId = branchId;
+            }
+            rootBranchId = rootBranchId ?? branchId;
+            prevBranchId = branchId;
+        }
+
+        const newSessionId = generateUuid();
+        const serialized: SerializedChatModel = {
+            sessionId: newSessionId,
+            location: session.model.location,
+            hierarchy: { rootBranchId: rootBranchId!, branches },
+            requests: slice.map(req => req.toSerializable()),
+            responses: slice.map(req => req.response.toSerializable())
+        };
+        const model = new MutableChatModel(serialized);
+        this.restoreBranchResponseContent(model, slice);
+        const firstUserText = requests[0]?.request.displayText ?? requests[0]?.request.text ?? '';
+        const title = `[分岐] ${firstUserText.slice(0, 50) || '新しい会話'}`;
+
+        await this.chatSessionStore.storeSessions({
+            model,
+            title,
+            pinnedAgentId: session.pinnedAgent?.id
+        }).catch(() => { /* noop */ });
+        await this.loadSession(newSessionId);
+        this.uiService.notifySessionsMutated();
+    }
+
+    /**
+     * MutableChatModel restores response metadata only. Theia leaves content
+     * restoration to ChatService deserializers, so a freshly constructed branch
+     * model must be repopulated before storeSessions serializes it.
+     */
+    protected restoreBranchResponseContent(model: MutableChatModel, sourceRequests: ChatRequestModel[]): void {
+        const targets = new Map(model.getRequests().map(req => [req.id, req]));
+        for (const source of sourceRequests) {
+            const content = source.response.response.content;
+            if (content.length === 0) {
+                continue;
+            }
+            const target = targets.get(source.id);
+            const mutable = target?.response.response as unknown as MutableResponseContentLike | undefined;
+            if (!mutable) {
+                continue;
+            }
+            if (mutable.addContents) {
+                mutable.addContents(content);
+            } else {
+                content.forEach(part => mutable.addContent(part));
+            }
+        }
+    }
+
     /** Delete a whole turn (user+assistant) from the session and persist the change. */
     protected async deleteMessage(msg: UiMessage): Promise<void> {
         if (this.sending || !msg.requestId) {
@@ -822,7 +1107,12 @@ export class ArschatChatWidget extends ReactWidget {
         }
         const session = this.chatService.getSession(this.sessionId);
         if (session) {
-            await this.chatSessionStore.storeSessions(session.model).catch(() => { /* noop */ });
+            const sessionToStore: ChatModelWithMetadata = {
+                model: session.model,
+                title: session.title,
+                pinnedAgentId: session.pinnedAgent?.id
+            };
+            await this.chatSessionStore.storeSessions(sessionToStore).catch(() => { /* noop */ });
         }
     }
 
@@ -1031,10 +1321,47 @@ export class ArschatChatWidget extends ReactWidget {
         );
     }
 
+    protected renderEditForm(msg: UiMessage): React.ReactElement {
+        return (
+            <div className='arschat-message-edit'>
+                <textarea
+                    id={`arschat-message-edit-${msg.id}`}
+                    className='theia-input arschat-message-edit-textarea'
+                    value={this.editDraft}
+                    onChange={e => {
+                        this.editDraft = e.currentTarget.value;
+                        this.update();
+                    }}
+                    onKeyDown={e => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            this.saveEdit(msg);
+                        } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            this.cancelEdit(msg);
+                        }
+                    }}
+                />
+                <div className='arschat-message-edit-actions'>
+                    <button
+                        className='theia-button secondary arschat-message-edit-cancel'
+                        onClick={() => this.cancelEdit(msg)}
+                    >キャンセル</button>
+                    <button
+                        className='theia-button arschat-message-edit-save'
+                        disabled={this.editDraft.trim().length === 0}
+                        onClick={() => this.saveEdit(msg)}
+                    >保存</button>
+                </div>
+            </div>
+        );
+    }
+
     protected renderMessage(msg: UiMessage): React.ReactElement {
         if (msg.author === 'user') {
             return (
                 <div key={msg.id} className='arschat-chat-message arschat-chat-message-user'>
+                    <div className='arschat-message-col'>
                     <div className='arschat-chat-message-bubble'>
                         {msg.images && msg.images.length > 0 && (
                             <div className='arschat-message-images'>
@@ -1043,7 +1370,9 @@ export class ArschatChatWidget extends ReactWidget {
                                 ))}
                             </div>
                         )}
-                        {msg.text && <div className='arschat-user-text'>{msg.text}</div>}
+                        {msg.editing ? this.renderEditForm(msg) : (msg.text && <div className='arschat-user-text'>{msg.text}</div>)}
+                    </div>
+                    {!msg.editing && msg.requestId && this.renderMessageActions(msg)}
                     </div>
                 </div>
             );
@@ -1056,6 +1385,8 @@ export class ArschatChatWidget extends ReactWidget {
             <div key={msg.id} className='arschat-chat-message arschat-chat-message-assistant'>
                 <div className='arschat-message-col'>
                 <div className='arschat-chat-message-bubble'>
+                    {msg.editing ? this.renderEditForm(msg) : (
+                    <>
                     {isThinkingInProgress && (
                         <div className='arschat-think-block'>
                             <div className='arschat-think-toggle'>
@@ -1087,9 +1418,11 @@ export class ArschatChatWidget extends ReactWidget {
                         </div>
                     )}
                     {msg.streaming && <span className='arschat-chat-cursor'> ▍</span>}
+                    </>
+                    )}
                 </div>
-                {!msg.streaming && this.renderStatsBar(msg)}
-                {!msg.streaming && msg.requestId && this.renderMessageActions(msg)}
+                {!msg.editing && !msg.streaming && this.renderStatsBar(msg)}
+                {!msg.editing && !msg.streaming && msg.requestId && this.renderMessageActions(msg)}
                 </div>
             </div>
         );
@@ -1174,9 +1507,21 @@ export class ArschatChatWidget extends ReactWidget {
                         </svg>
                     )}
                 </button>
+                {this.canEditMessage(msg) && (
+                    <button
+                        className='arschat-message-action arschat-message-action-edit'
+                        title='編集'
+                        onClick={() => this.startEdit(msg)}
+                    >
+                        <svg width='12' height='12' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                            <path d='M11 2.5l2.5 2.5L5 13.5H2.5V11L11 2.5z'
+                                stroke='currentColor' strokeWidth='1.2' strokeLinecap='round' strokeLinejoin='round' />
+                        </svg>
+                    </button>
+                )}
                 {canRegenerate && (
                     <button
-                        className='arschat-message-action'
+                        className='arschat-message-action arschat-message-action-regenerate'
                         title='再生成'
                         onClick={() => this.regenerate(msg)}
                     >
@@ -1186,6 +1531,31 @@ export class ArschatChatWidget extends ReactWidget {
                         </svg>
                     </button>
                 )}
+                {canRegenerate && (
+                    <button
+                        className='arschat-message-action arschat-message-action-continue'
+                        title='続きを生成'
+                        onClick={() => this.continueMessage(msg)}
+                    >
+                        <svg width='12' height='12' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                            <path d='M3 8h10M10 5l3 3-3 3'
+                                stroke='currentColor' strokeWidth='1.3' strokeLinecap='round' strokeLinejoin='round' />
+                        </svg>
+                    </button>
+                )}
+                <button
+                    className='arschat-message-action arschat-message-action-branch'
+                    title='ここから分岐'
+                    onClick={() => this.branchMessage(msg)}
+                >
+                    <svg width='12' height='12' viewBox='0 0 16 16' fill='none' aria-hidden='true'>
+                        <circle cx='4' cy='3' r='1.5' stroke='currentColor' strokeWidth='1.2' />
+                        <circle cx='4' cy='13' r='1.5' stroke='currentColor' strokeWidth='1.2' />
+                        <circle cx='12' cy='8' r='1.5' stroke='currentColor' strokeWidth='1.2' />
+                        <path d='M4 4.5v7' stroke='currentColor' strokeWidth='1.2' strokeLinecap='round' />
+                        <path d='M4 7.5Q4 8 6 8h4.5' stroke='currentColor' strokeWidth='1.2' strokeLinecap='round' />
+                    </svg>
+                </button>
                 <button
                     className='arschat-message-action arschat-message-action-delete'
                     title='削除'

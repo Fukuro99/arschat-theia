@@ -10,7 +10,8 @@ import { SkillService } from 'arschat-agents/lib/browser/skill-service';
 import { ArschatChatUiService } from './arschat-chat-ui-service';
 import { ArschatStatsStore } from './arschat-stats-store';
 import { ToolConfirmationManager } from '@theia/ai-chat/lib/browser/chat-tool-preference-bindings';
-import { ToolCallChatResponseContentImpl } from '@theia/ai-chat/lib/common/chat-model';
+import { TextChatResponseContentImpl, ToolCallChatResponseContentImpl } from '@theia/ai-chat/lib/common/chat-model';
+import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-variable';
 import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
 import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
 import { render } from '@testing-library/react';
@@ -26,6 +27,9 @@ describe('ArschatChatWidget', () => {
     /** requestIds removed from the fake model by the widget's dropTurnFromModel. */
     let removedRequestIds: string[];
     let storeSessionsCalls: number;
+    let storedSessions: any[];
+    let fakeRequests: any[];
+    let restoredSessionId: string | undefined;
     /** durations recorded / forgotten via the fake ArschatStatsStore (M6 e-25). */
     let recordedDurations: Array<{ requestId: string; durationMs: number }>;
     let forgottenRequestIds: string[];
@@ -38,6 +42,9 @@ describe('ArschatChatWidget', () => {
         setSessionConfirmationModeCalls = [];
         removedRequestIds = [];
         storeSessionsCalls = 0;
+        storedSessions = [];
+        fakeRequests = [];
+        restoredSessionId = undefined;
         recordedDurations = [];
         forgottenRequestIds = [];
         storedDurations = new Map<string, number>();
@@ -58,7 +65,11 @@ describe('ArschatChatWidget', () => {
             bind(ChatService).toConstantValue({
                 getSession: (_id: string) => ({
                     id: 'sess-1',
+                    title: 'Existing session title',
+                    pinnedAgent: { id: 'arschat-agent' },
                     model: {
+                        location: 'panel',
+                        getRequests: () => fakeRequests,
                         getBranch: (requestId: string) => {
                             removedRequestIds.push(requestId);
                             return {
@@ -69,10 +80,17 @@ describe('ArschatChatWidget', () => {
                             };
                         }
                     }
-                })
+                }),
+                getOrRestoreSession: async (id: string) => {
+                    restoredSessionId = id;
+                    return { id, model: { getRequests: () => [] } };
+                }
             } as unknown as ChatService);
             bind(ChatSessionStore).toConstantValue({
-                storeSessions: async () => { storeSessionsCalls++; }
+                storeSessions: async (...sessions: any[]) => {
+                    storeSessionsCalls++;
+                    storedSessions.push(...sessions);
+                }
             } as unknown as ChatSessionStore);
             bind(ArschatStatsStore).toConstantValue({
                 ready: async () => undefined,
@@ -261,13 +279,30 @@ describe('ArschatChatWidget', () => {
         return asAny(widget).messages[1];
     }
 
-    it('shows copy + 再生成 + 削除 on the last assistant message', () => {
+    it('shows copy + edit + regenerate + continue + branch + delete on the last assistant message', () => {
         seedTurn();
         const element = render(widget.render());
-        expect(element.container.querySelector('.arschat-message-actions')).toBeTruthy();
-        expect(element.queryByTitle('コピー')).toBeTruthy();
-        expect(element.queryByTitle('再生成')).toBeTruthy();
-        expect(element.queryByTitle('削除')).toBeTruthy();
+        const assistantActions = element.container.querySelector('.arschat-chat-message-assistant .arschat-message-actions');
+        expect(assistantActions).toBeTruthy();
+        expect(assistantActions!.querySelectorAll('.arschat-message-action')).toHaveLength(6);
+        expect(assistantActions!.querySelector('[title="コピー"]')).toBeTruthy();
+        expect(assistantActions!.querySelector('[title="編集"]')).toBeTruthy();
+        expect(assistantActions!.querySelector('[title="再生成"]')).toBeTruthy();
+        expect(assistantActions!.querySelector('[title="続きを生成"]')).toBeTruthy();
+        expect(assistantActions!.querySelector('[title="ここから分岐"]')).toBeTruthy();
+        expect(assistantActions!.querySelector('.arschat-message-action-delete')).toBeTruthy();
+    });
+
+    it('shows copy + edit + branch + delete on a user message', () => {
+        seedTurn();
+        const element = render(widget.render());
+        const userActions = element.container.querySelector('.arschat-chat-message-user .arschat-message-actions');
+        expect(userActions).toBeTruthy();
+        expect(userActions!.querySelectorAll('.arschat-message-action')).toHaveLength(4);
+        expect(userActions!.querySelector('.arschat-message-action-edit')).toBeTruthy();
+        expect(userActions!.querySelector('.arschat-message-action-branch')).toBeTruthy();
+        expect(userActions!.querySelector('.arschat-message-action-continue')).toBeFalsy();
+        expect(userActions!.querySelector('.arschat-message-action-regenerate')).toBeFalsy();
     });
 
     it('hides 再生成 on an older assistant message (only the newest can regenerate)', () => {
@@ -279,9 +314,10 @@ describe('ArschatChatWidget', () => {
             { id: 4, author: 'assistant', text: 'a2', requestId: 'r2', streaming: false }
         ];
         const element = render(widget.render());
-        // one regenerate button total (only for the newest assistant)
+        // one regenerate/continue pair total (only for the newest assistant)
         expect(element.queryAllByTitle('再生成')).toHaveLength(1);
-        expect(element.queryAllByTitle('削除')).toHaveLength(2);
+        expect(element.queryAllByTitle('続きを生成')).toHaveLength(1);
+        expect(element.container.querySelectorAll('.arschat-message-action-delete')).toHaveLength(4);
     });
 
     it('does not render actions while an assistant message is still streaming', () => {
@@ -291,7 +327,7 @@ describe('ArschatChatWidget', () => {
             { id: 2, author: 'assistant', text: 'partial', requestId: 'r', streaming: true }
         ];
         const element = render(widget.render());
-        expect(element.container.querySelector('.arschat-message-actions')).toBeFalsy();
+        expect(element.container.querySelector('.arschat-chat-message-assistant .arschat-message-actions')).toBeFalsy();
     });
 
     it('regenerate preserves a half-written input draft (M6 e-26)', async () => {
@@ -312,6 +348,185 @@ describe('ArschatChatWidget', () => {
         expect(asAny(widget).inputValue).toBe('書きかけのドラフト');
     });
 
+    it('opens edit mode with the message text as the edit draft', () => {
+        const assistant = seedTurn('req-1');
+        asAny(widget).startEdit(assistant);
+        expect(assistant.editing).toBe(true);
+        expect(asAny(widget).editDraft).toBe('hi there');
+        const element = render(widget.render());
+        const ta = element.container.querySelector('.arschat-message-edit-textarea') as HTMLTextAreaElement | null;
+        expect(ta).toBeTruthy();
+        expect(ta!.value).toBe('hi there');
+    });
+
+    it('cancelEdit leaves message text unchanged and exits edit mode', () => {
+        const assistant = seedTurn('req-1');
+        asAny(widget).startEdit(assistant);
+        asAny(widget).editDraft = 'changed';
+        asAny(widget).cancelEdit(assistant);
+        expect(assistant.editing).toBe(false);
+        expect(assistant.text).toBe('hi there');
+        expect(asAny(widget).editDraft).toBe('');
+    });
+
+    it('saveUserEdit drops the edited and following turns, resends edited text, and restores input draft', async () => {
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'old q1', requestId: 'r1' },
+            { id: 2, author: 'assistant', text: 'old a1', requestId: 'r1', streaming: false },
+            { id: 3, author: 'user', text: 'old q2', requestId: 'r2' },
+            { id: 4, author: 'assistant', text: 'old a2', requestId: 'r2', streaming: false }
+        ];
+        asAny(widget).inputValue = 'draft';
+        let sentText: string | undefined;
+        asAny(widget).send = async () => {
+            expect(storeSessionsCalls).toBe(1);
+            sentText = asAny(widget).inputValue;
+            asAny(widget).inputValue = '';
+        };
+        await asAny(widget).saveUserEdit(asAny(widget).messages[0], 'edited q1');
+        expect(removedRequestIds).toEqual(['r1', 'r2']);
+        expect(asAny(widget).messages).toHaveLength(0);
+        expect(sentText).toBe('edited q1');
+        expect(asAny(widget).inputValue).toBe('draft');
+        expect(forgottenRequestIds).toEqual(['r1', 'r2']);
+        expect(storeSessionsCalls).toBe(1);
+        expect(storedSessions[0].title).toBe('Existing session title');
+        expect(storedSessions[0].pinnedAgentId).toBe('arschat-agent');
+    });
+
+    it('saveUserEdit resends the original image variables and restores draft images', async () => {
+        const originalImage = ImageContextVariable.createRequest({ data: 'abc123', mimeType: 'image/png', name: 'original.png' });
+        fakeRequests = [
+            {
+                id: 'r1',
+                request: { text: 'old q1', displayText: undefined, variables: [originalImage] },
+                response: { response: { content: [] } }
+            }
+        ];
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'old q1', requestId: 'r1', images: ['data:image/png;base64,abc123'] },
+            { id: 2, author: 'assistant', text: 'old a1', requestId: 'r1', streaming: false }
+        ];
+        const draftImage = { data: 'draft', mimeType: 'image/jpeg', name: 'draft.jpg', previewUrl: 'data:image/jpeg;base64,draft' };
+        asAny(widget).inputValue = 'draft text';
+        asAny(widget).pendingImages = [draftImage];
+        let sentImages: any[] | undefined;
+        let sentText: string | undefined;
+        asAny(widget).send = async () => {
+            sentText = asAny(widget).inputValue;
+            sentImages = [...asAny(widget).pendingImages];
+            asAny(widget).inputValue = '';
+            asAny(widget).pendingImages = [];
+        };
+        await asAny(widget).saveUserEdit(asAny(widget).messages[0], 'edited q1');
+        expect(sentText).toBe('edited q1');
+        expect(sentImages).toEqual([{
+            data: 'abc123',
+            mimeType: 'image/png',
+            name: 'original.png',
+            previewUrl: 'data:image/png;base64,abc123'
+        }]);
+        expect(asAny(widget).pendingImages).toEqual([draftImage]);
+        expect(asAny(widget).inputValue).toBe('draft text');
+    });
+
+    it('hides edit for image user messages whose variables cannot be safely restored', () => {
+        fakeRequests = [
+            {
+                id: 'r-path',
+                request: { text: 'look', displayText: undefined, variables: [ImageContextVariable.createPathBasedRequest('img.png', 'img.png')] },
+                response: { response: { content: [] } }
+            }
+        ];
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'look', requestId: 'r-path', images: ['data:image/png;base64,preview'] },
+            { id: 2, author: 'assistant', text: 'seen', requestId: 'r-path', streaming: false }
+        ];
+        const element = render(widget.render());
+        const userActions = element.container.querySelector('.arschat-chat-message-user .arschat-message-actions');
+        expect(userActions).toBeTruthy();
+        expect(userActions!.querySelector('.arschat-message-action-edit')).toBeFalsy();
+    });
+
+    it('saveAssistantEdit overwrites response content and persists without sending', async () => {
+        const assistant = seedTurn('req-1');
+        const content: any[] = [{ kind: 'text', asString: () => 'old' }];
+        assistant.response = {
+            response: {
+                content,
+                clearContent: () => { content.splice(0, content.length); },
+                addContent: (part: any) => { content.push(part); }
+            }
+        };
+        let sendCalled = false;
+        asAny(widget).send = async () => { sendCalled = true; };
+        await asAny(widget).saveAssistantEdit(assistant, 'edited answer');
+        expect(sendCalled).toBe(false);
+        expect(assistant.text).toBe('edited answer');
+        expect(content).toHaveLength(1);
+        expect(content[0].asString()).toBe('edited answer');
+        expect(storeSessionsCalls).toBe(1);
+    });
+
+    it('continueMessage sends the explicit continue prompt and restores input draft', async () => {
+        const assistant = seedTurn('req-1');
+        asAny(widget).inputValue = 'draft';
+        let sentText: string | undefined;
+        asAny(widget).send = async () => {
+            sentText = asAny(widget).inputValue;
+            asAny(widget).inputValue = '';
+        };
+        await asAny(widget).continueMessage(assistant);
+        expect(sentText).toBe('続けてください');
+        expect(asAny(widget).inputValue).toBe('draft');
+    });
+
+    it('branchMessage stores a sliced session and loads it', async () => {
+        const assistant = seedTurn('r2');
+        const responseWithText = (requestId: string, text: string): any => {
+            const content = [new TextChatResponseContentImpl(text)];
+            return {
+                response: { content },
+                toSerializable: () => ({ id: `resp-${requestId}`, requestId, isComplete: true, isError: false, content: content.map(part => part.toSerializable()) })
+            };
+        };
+        fakeRequests = [
+            {
+                id: 'r1',
+                request: { text: 'first user prompt', displayText: undefined },
+                response: responseWithText('r1', 'first assistant answer'),
+                toSerializable: () => ({ id: 'r1', text: 'first user prompt' })
+            },
+            {
+                id: 'r2',
+                request: { text: 'second prompt', displayText: undefined },
+                response: responseWithText('r2', 'second assistant answer'),
+                toSerializable: () => ({ id: 'r2', text: 'second prompt' })
+            },
+            {
+                id: 'r3',
+                request: { text: 'trailing prompt', displayText: undefined },
+                response: responseWithText('r3', 'trailing assistant answer'),
+                toSerializable: () => ({ id: 'r3', text: 'trailing prompt' })
+            }
+        ];
+        await asAny(widget).branchMessage(assistant);
+        expect(storeSessionsCalls).toBe(1);
+        expect(storedSessions[0].title).toBe('[分岐] first user prompt');
+        expect(storedSessions[0].pinnedAgentId).toBe('arschat-agent');
+        const saved = storedSessions[0].model.toSerializable();
+        expect(saved.requests.map((r: any) => r.id)).toEqual(['r1', 'r2']);
+        expect(saved.responses.map((r: any) => r.content.map((part: any) => part.data.content))).toEqual([
+            ['first assistant answer'],
+            ['second assistant answer']
+        ]);
+        expect(restoredSessionId).toBe(storedSessions[0].model.id);
+        expect(asAny(widget).sessionId).toBe(storedSessions[0].model.id);
+    });
+
     it('copyMessage writes the message text to the clipboard and flags copied', async () => {
         const writeText = jest.fn().mockResolvedValue(undefined);
         Object.assign(navigator, { clipboard: { writeText } });
@@ -329,6 +544,8 @@ describe('ArschatChatWidget', () => {
         // the model was asked to remove that turn, then the session was stored
         expect(removedRequestIds).toContain('req-1');
         expect(storeSessionsCalls).toBe(1);
+        expect(storedSessions[0].title).toBe('Existing session title');
+        expect(storedSessions[0].pinnedAgentId).toBe('arschat-agent');
         // and the recorded duration for the turn is dropped too (M6 e-25)
         expect(forgottenRequestIds).toContain('req-1');
     });

@@ -653,8 +653,16 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    max-width: 85%;
     min-width: 0;
+}
+
+.arschat-chat-message-assistant .arschat-message-col {
+    max-width: 85%;
+}
+
+.arschat-chat-message-user .arschat-message-col {
+    align-items: flex-end;
+    max-width: 60%;
 }
 
 .arschat-message-col .arschat-chat-message-bubble {
@@ -671,7 +679,7 @@
     transition: opacity 150ms ease;
 }
 
-.arschat-chat-message-assistant:hover .arschat-message-actions,
+.arschat-chat-message:hover .arschat-message-actions,
 .arschat-message-actions:focus-within {
     opacity: 1;
 }
@@ -697,6 +705,38 @@
 
 .arschat-message-action-delete:hover {
     color: var(--theia-errorForeground, #c0392b);
+}
+
+/* ===================== M7/MS8: in-place message editing ===================== */
+.arschat-message-edit {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: min(420px, 70vw);
+}
+
+.arschat-message-edit-textarea {
+    width: 100%;
+    min-height: 70px;
+    max-height: 260px;
+    resize: vertical;
+    box-sizing: border-box;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--theia-input-foreground, var(--theia-foreground));
+    background: var(--theia-input-background, var(--theia-editor-background));
+}
+
+.arschat-message-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.arschat-message-edit-actions .theia-button {
+    margin: 0;
+    font-size: 12px;
 }
 
 /* ===================== M6 e-25: message stats bar ===================== */

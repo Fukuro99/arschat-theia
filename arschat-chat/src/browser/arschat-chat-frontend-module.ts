@@ -25,6 +25,7 @@ import { ArschatStatsStore } from './arschat-stats-store';
 import { ArschatInformationalPartRenderer } from './arschat-informational-part-renderer';
 import { ArschatM3AutotestContribution } from './arschat-m3-autotest-contribution';
 import { ArschatM6AutotestContribution } from './arschat-m6-autotest-contribution';
+import { ArschatM7AutotestContribution } from './arschat-m7-autotest-contribution';
 import { bindViewContribution, FrontendApplicationContribution, WidgetFactory } from '@theia/core/lib/browser';
 import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
 
@@ -72,4 +73,9 @@ export default new ContainerModule(bind => {
     // features (IDE dilution, code highlight, KaTeX, message action bar, stats bar).
     bind(ArschatM6AutotestContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatM6AutotestContribution);
+
+    // M7/MS8 autotest (no-op unless ARSCHAT_M7_AUTOTEST=1): verifies edit,
+    // continue, and branch through the real chat widget DOM.
+    bind(ArschatM7AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM7AutotestContribution);
 });
