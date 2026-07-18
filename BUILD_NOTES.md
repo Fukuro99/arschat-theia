@@ -1131,3 +1131,23 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 ### 実機確認できなかった項目
 
 - API キーを使った実プロバイダでの編集→再生成の応答品質 (autotest はモック LanguageModel)。Theia 再起動を跨いだ分岐セッションの永続化はストア保存経路 (storeSessions → getOrRestoreSession) のユニットテストと autotest の範囲で担保し、目視の再起動確認は行っていない。
+
+## Phase 1 MS10 実装メモ (e-52/e-53/e-54/e-55 + IME 恒久修正)
+
+作業日: 2026-07-18 / 対象: 添付画像の送信時自動縮小 + 添付 UX のテスト固定。分業: 調査 = Sonnet (MS10_BRIEF.md)、実装・レビュー = Codex CLI (別セッション)、指揮・検証 = Fable。
+
+- **調査の主発見**: SPEC 起票時の想定と異なり、サムネイル一覧 (`.arschat-attachments`) と個別削除 (`removePendingImage`) は ms-4 (M3) 時点で実装済みだった。ms-10 の新規実装は自動縮小のみで、e-52/e-53 は「既存挙動の Jest 固定」に再定義 (SPEC も改訂済み)。
+- **e-54 自動縮小**: サイズ計算を純粋関数 `arschat-image-resize.ts` (`computeResizeTarget`、長辺上限 1568px、`shouldResizeImageMimeType` で GIF 除外) に分離し、canvas 描画は widget の薄い wrapper に隔離。`send()` は `pendingImages` をスナップショットして即クリア (送信の体感維持) → 縮小 await → `ImageContextVariable.createRequest`。jsdom に canvas が無いため「純粋関数フルテスト / canvas・Image ピンポイントモック / send 統合では wrapper スタブ」の 3 層でテスト。
+- **Codex レビュー (2 巡、指摘 4 件)**: (1) 縮小 await 中のセッション/モデル切替で古い送信が新セッションに流れる → 送信開始時に sessionId/model を捕捉し `sendSeq` 世代トークンで stale 送信を破棄。(2) `regenerate()` が元 request の `ImageContextVariable` を復元せずテキストのみ再送 + 入力欄の未送信添付が混入 (既存バグ) → saveUserEdit と同様の復元 + draft 退避/復元。(3) 縮小失敗で添付ごと消える → 原寸で送る fail-open (`console.warn`)。(4) user 編集経路の縮小通過を統合テストで検証。2 巡目で「問題なし」判定。
+- **IME 恒久修正 (実機で発覚)**: e-48 の「composition 中は再描画抑制」ゲートが React controlled 入力の値巻き戻し (onChange 後に再描画が無いと DOM 値を直前の描画値へ強制復元する仕様) と衝突し、日本語が全く入力できなくなっていた (予測窓のみ動作)。controlled のままでは「再描画 = 二重入力 / 抑制 = 入力不能」の両詰みのため、入力欄 3 箇所 (メイン textarea・編集 textarea・接続先 URL input) を **uncontrolled (`defaultValue` + ref) に転換**し、プログラム側の書き換え (サジェスト確定・送信クリア・draft 退避/復元・endpoint sync 等) は `setInputValue` / `setEditDraft` / `setCustomEndpointDraft` で DOM へ直接同期。composition ゲートと IME Enter ガードは維持 (誤送信防止として引き続き有効)。
+
+確認結果:
+
+- `yarn workspace arschat-chat build`: 成功。
+- `yarn workspace arschat-chat test`: 5 suites / **95 tests all green** (77 → 87 実装 → 92 レビュー対応 → 95 uncontrolled 化)。
+- 実機 (Electron, `yarn build:electron` + `yarn start:electron`): 日本語入力の変換・確定が正常 / サムネイル表示 / × 個別削除 / 大画像送信 / 画像付き再生成の画像引き継ぎ、をユーザー確認済み。
+
+### 実機確認できなかった項目
+
+- 縮小後画像の実バイトサイズ・画質の計測 (縮小の発火と送信成功は確認済み)。
+- 実 LM Studio サーバー相手の縮小画像認識 (実機確認はクラウドプロバイダ側で実施)。
