@@ -245,6 +245,11 @@
     flex: 0 0 auto;
 }
 
+.arschat-terminal-toggle-button {
+    font-size: 12px;
+    flex: 0 0 auto;
+}
+
 .arschat-chat-input {
     resize: none;
     min-height: 24px;

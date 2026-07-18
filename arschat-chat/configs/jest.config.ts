@@ -19,5 +19,15 @@ export default async (): Promise<Config.InitialOptions> => ({
         // token, so stub it for tests (M5 e-3).
         '@theia/ai-chat/lib/browser/chat-tool-preference-bindings':
             '<rootDir>/configs/stubs/chat-tool-preference-bindings.js',
+        // TerminalFrontendContribution also pulls the full Theia browser shell and
+        // CSS. The widget only needs TerminalCommands.TOGGLE_TERMINAL.id in unit
+        // tests, so keep this as a command-id stub (M11).
+        '@theia/terminal/lib/browser/terminal-frontend-contribution':
+            '<rootDir>/configs/stubs/terminal-frontend-contribution.js',
+        // ApplicationShell is only a DI token in widget tests. Loading Theia's
+        // browser barrel pulls shell/status-bar CSS, so stub the exact barrel
+        // import while leaving browser subpaths (ReactWidget etc.) untouched.
+        '@theia/core/lib/browser$':
+            '<rootDir>/configs/stubs/application-shell.js',
     }
 });

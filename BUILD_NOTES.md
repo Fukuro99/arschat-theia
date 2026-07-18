@@ -1151,3 +1151,30 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 
 - 縮小後画像の実バイトサイズ・画質の計測 (縮小の発火と送信成功は確認済み)。
 - 実 LM Studio サーバー相手の縮小画像認識 (実機確認はクラウドプロバイダ側で実施)。
+
+## Phase 1 MS11 実装メモ (e-61〜e-64: 組み込みターミナルの再露出)
+
+作業日: 2026-07-19 / 対象: チャットの隣で組み込みターミナルが使える (下パネル + ヘッダー専用トグルボタン)。分業: 調査 = Sonnet (MS11_BRIEF.md)、実装・レビュー = Codex CLI (別セッション)、指揮・検証 = Fable。
+
+- **調査の主発見**: `@theia/terminal` は全アプリの依存に入ったまま「眠っていない」。`Ctrl+\`` キーバインドと `workbench.action.terminal.toggleTerminal` (開閉トグルの完成品) はフィルタされておらず生きている。希釈で消えていたのは Terminal トップメニューという入口だけで、当初想定は「ボタン 1 個で既存コマンドを呼ぶだけ」だった。
+- **e-61 トグルボタン (2 段階の設計逸脱)**: 実装当初はブリーフ推奨どおり `CommandRegistry.executeCommand(TOGGLE_TERMINAL)` への全委譲だったが、実機 autotest が 2 つの実バグを検出し、最終的に `toggleTerminal()` は 3 分岐の自前実装になった:
+  1. **閉じられない**: Theia のトグルは「visible なターミナルが `shell.activeWidget` のときだけ collapse」。ヘッダーボタンはクリック時にフォーカスがチャット側へ移るため collapse 分岐に永遠に入れない (Theia のトグルはターミナル内で押す Ctrl+\` 前提の設計)。→ collapse を自前化。
+  2. **開いても空に見える**: レイアウト復元されたターミナルはタブ未選択のまま bottom パネルに入っており、Theia トグルの展開分岐は `widget.activate()` しか呼ばずタブ選択 (`selectWidget`) を保証しない → パネルは展開されるが isVisible=false のまま (20 秒待っても不変)。→ 開く側も `expandPanel + bottomPanel.activateWidget` で自前化。
+  - 最終形: ターミナル無し = Theia コマンド委譲 (新規作成のプロファイル解決は再実装しない) / 展開中 + visible = `collapsePanel('bottom')` / それ以外 = `expandPanel` + `bottomPanel.activateWidget`。MS11_BRIEF §3.1 の「トグル再実装非推奨」は「フォーカス・タブ選択に依存しない開閉」という要件の前では成立しなかった、が判断軌跡の核心。
+- **希釈は不変更**: `arschat-ide-dilution.ts` は一切触っていない。Terminal トップメニューは隠れたまま (M6 autotest シナリオ 1 で PASS 確認)。
+- **Jest**: `CommandRegistry` / `ApplicationShell` の注入に伴い、テスト DI へフェイク束縛を追加。`@theia/terminal/lib/browser/terminal-frontend-contribution` は command id だけの stub (Theia 更新時は本物と目視同期、stub 冒頭コメント参照)、`@theia/core/lib/browser$` は barrel 完全一致のみ ApplicationShell stub に差し替え (subpath import には波及しない)。5 suites / 99 tests green (95 → 97 実装 → 98 → 99 修正)。
+- **Codex レビュー (3 巡)**: 1 巡目 major 1 件 (autotest close 判定が activeWidget 依存で脆い) + minor 1 件 (stub id のズレ検知不能 → コメント対応) → 修正。2 巡目「問題なし」。実機バグ 2 件の修正後に 3 巡目「問題なし」。
+- **実機 autotest**: `ARSCHAT_M11_AUTOTEST=1` で SUMMARY: **3 PASS / 0 FAIL** (ボタン存在 / 開く / 閉じる)。修正前は開くが isVisible=false で 20 秒 FAIL していたものが、タブ選択自前化後は約 250ms で PASS。再起動を挟んだ複数回の実行でレイアウト破綻なし (e-62)。
+- **既知の別問題 (ms-11 スコープ外)**: M6 autotest シナリオ 2 (activity bar) が FAIL — `electron-app/plugins/` にユーザー導入された GitLens のビュー 3 つと、GitLens が実行時に呼び込む scm-view-container が左パネルに出る。プラグインビューは FilterContribution (起動前除外) にも stale cleanup (初期化時走査) にも乗らない経路のため、希釈の仕組みが構造的に効かない。別タスクとして切り出し済み。
+- **運用の罠**: ArsChat 起動中は `conpty.node` がロックされ `yarn build:electron` が EBUSY で失敗する。ビルド前にアプリを終了すること。
+
+確認結果:
+
+- `yarn workspace arschat-chat build`: 成功。
+- `yarn workspace arschat-chat test`: 5 suites / 99 tests all green。
+- 実機 autotest: M11 3 PASS / 0 FAIL、M6 5 PASS / 1 FAIL (FAIL は上記 GitLens 既存問題のみ)。
+
+### 実機確認できなかった項目 (ユーザー確認待ち)
+
+- ターミナルでの実コマンド実行 (`dir` / `echo`) と出力の目視、日本語の表示・入力 (autotest は開閉までで、シェルへの打鍵は行っていない)。
+- 既定シェルが cmd / PowerShell のどちらで開くか (Theia 既定に任せている)。

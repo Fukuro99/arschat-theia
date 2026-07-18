@@ -1,7 +1,9 @@
 import 'reflect-metadata';
 import { ContainerModule, Container } from '@theia/core/shared/inversify';
+import { ApplicationShell } from '@theia/core/lib/browser';
 import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
 import { ArschatChatWidget } from './arschat-chat-widget';
+import { CommandRegistry } from '@theia/core/lib/common/command';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatSessionStore } from '@theia/ai-chat/lib/common/chat-session-store';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
@@ -20,6 +22,7 @@ import { fireEvent, render } from '@testing-library/react';
 import { act } from 'react';
 import { ArschatProviderKind, OPENAI_CUSTOM_ENDPOINTS_PREF, PREF_ACTIVE_MODEL, PREF_ACTIVE_PROVIDER } from 'arschat-providers/lib/browser/arschat-provider-preferences';
 import { computeResizeTarget, shouldResizeImageMimeType } from './arschat-image-resize';
+import { TerminalCommands } from '@theia/terminal/lib/browser/terminal-frontend-contribution';
 
 describe('ArschatChatWidget', () => {
 
@@ -49,6 +52,12 @@ describe('ArschatChatWidget', () => {
     let getModelsForProvider: jest.Mock<Promise<any[]>, [ArschatProviderKind]>;
     let setActiveCalls: Array<{ provider: ArschatProviderKind; model?: string }>;
     let sendRequestCalls: Array<{ sessionId: string; request: { text: string; displayText?: string; variables?: AIVariableResolutionRequest[] } }>;
+    let executeCommand: jest.Mock;
+    let bottomExpanded: boolean;
+    let bottomWidgets: Array<{ id: string; isVisible: boolean }>;
+    let collapsePanel: jest.Mock;
+    let expandPanel: jest.Mock;
+    let activateBottomWidget: jest.Mock;
 
     beforeEach(async () => {
         registeredTools = new Map<string, ToolRequest>();
@@ -75,6 +84,22 @@ describe('ArschatChatWidget', () => {
         liveCustomModels = new Map<ArschatProviderKind, string[]>();
         setActiveCalls = [];
         sendRequestCalls = [];
+        executeCommand = jest.fn();
+        bottomExpanded = false;
+        bottomWidgets = [];
+        collapsePanel = jest.fn((area: string) => {
+            if (area === 'bottom') {
+                bottomExpanded = false;
+            }
+        });
+        expandPanel = jest.fn((area: string) => {
+            if (area === 'bottom') {
+                bottomExpanded = true;
+            }
+        });
+        activateBottomWidget = jest.fn((widget: { isVisible: boolean }) => {
+            widget.isVisible = true;
+        });
         fetchCustomEndpointModels = jest.fn(async (kind: ArschatProviderKind) => liveCustomModels.get(kind) ?? []);
         getModelsForProvider = jest.fn(async (_kind: ArschatProviderKind) => [] as any[]);
         updateCustomEndpointUrl = jest.fn(async (kind: ArschatProviderKind, rawUrl: string) => {
@@ -100,6 +125,18 @@ describe('ArschatChatWidget', () => {
         const module = new ContainerModule(bind => {
             // Minimal stubs: doInit() is async and fired from postConstruct, but render()
             // works off the widget's own fields, so a bare stub is enough for rendering.
+            bind(CommandRegistry).toConstantValue({
+                executeCommand
+            } as unknown as CommandRegistry);
+            bind(ApplicationShell).toConstantValue({
+                isExpanded: (area: string) => area === 'bottom' ? bottomExpanded : false,
+                getWidgets: (area: string) => area === 'bottom' ? bottomWidgets : [],
+                collapsePanel,
+                expandPanel,
+                bottomPanel: {
+                    activateWidget: activateBottomWidget
+                }
+            } as unknown as ApplicationShell);
             bind(ProviderSwitchService).toConstantValue({
                 getActiveProvider: () => activeProvider,
                 getActiveModel: () => activeModel,
@@ -234,6 +271,50 @@ describe('ArschatChatWidget', () => {
         const element = render(widget.render());
         expect(element.queryByText('Anthropic')).toBeTruthy();
         expect(element.queryByText('LM Studio')).toBeTruthy();
+    });
+
+    it('renders the terminal toggle button in the header', () => {
+        const element = render(widget.render());
+        expect(element.container.querySelector('#arschat-terminal-toggle-button')).toBeTruthy();
+    });
+
+    it('delegates to the Theia terminal toggle command when there is no bottom terminal', () => {
+        const element = render(widget.render());
+        const button = element.container.querySelector('#arschat-terminal-toggle-button') as HTMLButtonElement | null;
+        expect(button).toBeTruthy();
+        fireEvent.click(button!);
+        expect(executeCommand).toHaveBeenCalledWith(TerminalCommands.TOGGLE_TERMINAL.id);
+        expect(collapsePanel).not.toHaveBeenCalled();
+        expect(expandPanel).not.toHaveBeenCalled();
+        expect(activateBottomWidget).not.toHaveBeenCalled();
+    });
+
+    it('collapses the bottom panel directly when a terminal is already visible', () => {
+        bottomExpanded = true;
+        bottomWidgets = [{ id: 'terminal-0', isVisible: true }];
+
+        const element = render(widget.render());
+        const button = element.container.querySelector('#arschat-terminal-toggle-button') as HTMLButtonElement | null;
+        expect(button).toBeTruthy();
+        fireEvent.click(button!);
+        expect(collapsePanel).toHaveBeenCalledWith('bottom');
+        expect(executeCommand).not.toHaveBeenCalled();
+        expect(expandPanel).not.toHaveBeenCalled();
+        expect(activateBottomWidget).not.toHaveBeenCalled();
+    });
+
+    it('expands and activates an existing terminal when it is hidden or unselected', () => {
+        bottomExpanded = true;
+        bottomWidgets = [{ id: 'terminal-0', isVisible: false }];
+
+        const element = render(widget.render());
+        const button = element.container.querySelector('#arschat-terminal-toggle-button') as HTMLButtonElement | null;
+        expect(button).toBeTruthy();
+        fireEvent.click(button!);
+        expect(expandPanel).toHaveBeenCalledWith('bottom');
+        expect(activateBottomWidget).toHaveBeenCalledWith(bottomWidgets[0]);
+        expect(executeCommand).not.toHaveBeenCalled();
+        expect(collapsePanel).not.toHaveBeenCalled();
     });
 
     it('should show persona options in the header (M4)', () => {

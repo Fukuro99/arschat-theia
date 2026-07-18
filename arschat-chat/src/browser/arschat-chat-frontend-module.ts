@@ -26,6 +26,7 @@ import { ArschatInformationalPartRenderer } from './arschat-informational-part-r
 import { ArschatM3AutotestContribution } from './arschat-m3-autotest-contribution';
 import { ArschatM6AutotestContribution } from './arschat-m6-autotest-contribution';
 import { ArschatM7AutotestContribution } from './arschat-m7-autotest-contribution';
+import { ArschatM11AutotestContribution } from './arschat-m11-autotest-contribution';
 import { bindViewContribution, FrontendApplicationContribution, WidgetFactory } from '@theia/core/lib/browser';
 import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
 
@@ -78,4 +79,9 @@ export default new ContainerModule(bind => {
     // continue, and branch through the real chat widget DOM.
     bind(ArschatM7AutotestContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatM7AutotestContribution);
+
+    // M11 autotest (no-op unless ARSCHAT_M11_AUTOTEST=1): verifies the chat
+    // header terminal toggle button expands and collapses Theia's bottom panel.
+    bind(ArschatM11AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM11AutotestContribution);
 });

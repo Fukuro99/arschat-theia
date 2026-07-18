@@ -20,8 +20,9 @@
 import * as React from 'react';
 import { injectable, postConstruct, inject } from '@theia/core/shared/inversify';
 import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
-import { Message } from '@theia/core/lib/browser';
+import { ApplicationShell, type Message } from '@theia/core/lib/browser';
 import { DisposableCollection } from '@theia/core';
+import { CommandRegistry } from '@theia/core/lib/common/command';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
 import { ChatSessionStore } from '@theia/ai-chat/lib/common/chat-session-store';
@@ -43,6 +44,7 @@ import { LanguageModel } from '@theia/ai-core';
 import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
 import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
 import { generateUuid } from '@theia/core/lib/common/uuid';
+import { TerminalCommands } from '@theia/terminal/lib/browser/terminal-frontend-contribution';
 import {
     ArschatProviderKind,
     PROVIDERS
@@ -163,6 +165,12 @@ export class ArschatChatWidget extends ReactWidget {
 
     @inject(ToolInvocationRegistry)
     protected readonly toolInvocationRegistry!: ToolInvocationRegistry;
+
+    @inject(CommandRegistry)
+    protected readonly commandRegistry!: CommandRegistry;
+
+    @inject(ApplicationShell)
+    protected readonly shell!: ApplicationShell;
 
     protected sessionId: string | undefined;
     /** id of the request currently being generated (for abort). */
@@ -570,6 +578,36 @@ export class ArschatChatWidget extends ReactWidget {
         this.uiService.notifySessionChanged(undefined);
         this.update();
         this.focusInput();
+    }
+
+    protected toggleTerminal(): void {
+        const terminals = this.shell.getWidgets('bottom').filter(widget => this.isTerminalWidget(widget));
+
+        if (terminals.length === 0) {
+            this.commandRegistry.executeCommand(TerminalCommands.TOGGLE_TERMINAL.id);
+            return;
+        }
+
+        // Theia's terminal toggle only collapses when the visible terminal is
+        // shell.activeWidget. This header button moves focus back to ArsChat before
+        // the command runs, so we intentionally handle the collapse case here.
+        if (this.shell.isExpanded('bottom') && terminals.some(widget => widget.isVisible)) {
+            this.shell.collapsePanel('bottom');
+            return;
+        }
+
+        // This intentionally extends the MS11_BRIEF.md 3.1 exception to Theia
+        // toggle reuse: restored terminal widgets can be unselected bottom tabs,
+        // and expandPanel + Widget.activate() does not guarantee tab selection.
+        this.shell.expandPanel('bottom');
+        this.shell.bottomPanel.activateWidget(terminals[0]);
+    }
+
+    protected isTerminalWidget(widget: { id: string }): boolean {
+        // Theia terminal widgets are created from the 'terminal' factory; the live
+        // M11 autotest uses the same terminal-<n> id shape to avoid importing the
+        // browser TerminalWidget class just for an instanceof check.
+        return widget.id.startsWith('terminal-');
     }
 
     /** Restore a persisted session into the UI. */
@@ -1637,6 +1675,12 @@ export class ArschatChatWidget extends ReactWidget {
                         >
                             {this.renderModelOptions(modelNames)}
                         </select>
+                        <button
+                            id='arschat-terminal-toggle-button'
+                            className='theia-button secondary arschat-terminal-toggle-button'
+                            title='ターミナルの表示/非表示'
+                            onClick={() => this.toggleTerminal()}
+                        >ターミナル</button>
                     </div>
                 </div>
                 {this.isCustomEndpointProvider(this.provider) && (

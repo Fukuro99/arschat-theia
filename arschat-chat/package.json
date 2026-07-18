@@ -17,6 +17,7 @@
     "@theia/ai-core": "1.71.2",
     "@theia/core": "1.71.2",
     "@theia/filesystem": "1.71.2",
+    "@theia/terminal": "1.71.2",
     "@theia/workspace": "1.71.2",
     "arschat-agents": "0.0.1",
     "arschat-providers": "0.0.1",
