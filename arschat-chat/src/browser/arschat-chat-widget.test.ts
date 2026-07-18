@@ -13,11 +13,13 @@ import { ArschatStatsStore } from './arschat-stats-store';
 import { ToolConfirmationManager } from '@theia/ai-chat/lib/browser/chat-tool-preference-bindings';
 import { TextChatResponseContentImpl, ToolCallChatResponseContentImpl } from '@theia/ai-chat/lib/common/chat-model';
 import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-variable';
+import { AIVariableResolutionRequest } from '@theia/ai-core';
 import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
 import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
 import { fireEvent, render } from '@testing-library/react';
 import { act } from 'react';
 import { ArschatProviderKind, OPENAI_CUSTOM_ENDPOINTS_PREF, PREF_ACTIVE_MODEL, PREF_ACTIVE_PROVIDER } from 'arschat-providers/lib/browser/arschat-provider-preferences';
+import { computeResizeTarget, shouldResizeImageMimeType } from './arschat-image-resize';
 
 describe('ArschatChatWidget', () => {
 
@@ -46,6 +48,7 @@ describe('ArschatChatWidget', () => {
     let updateCustomEndpointUrl: jest.Mock<Promise<string>, [ArschatProviderKind, string]>;
     let getModelsForProvider: jest.Mock<Promise<any[]>, [ArschatProviderKind]>;
     let setActiveCalls: Array<{ provider: ArschatProviderKind; model?: string }>;
+    let sendRequestCalls: Array<{ sessionId: string; request: { text: string; displayText?: string; variables?: AIVariableResolutionRequest[] } }>;
 
     beforeEach(async () => {
         registeredTools = new Map<string, ToolRequest>();
@@ -71,6 +74,7 @@ describe('ArschatChatWidget', () => {
         ]);
         liveCustomModels = new Map<ArschatProviderKind, string[]>();
         setActiveCalls = [];
+        sendRequestCalls = [];
         fetchCustomEndpointModels = jest.fn(async (kind: ArschatProviderKind) => liveCustomModels.get(kind) ?? []);
         getModelsForProvider = jest.fn(async (_kind: ArschatProviderKind) => [] as any[]);
         updateCustomEndpointUrl = jest.fn(async (kind: ArschatProviderKind, rawUrl: string) => {
@@ -143,6 +147,20 @@ describe('ArschatChatWidget', () => {
                 getOrRestoreSession: async (id: string) => {
                     restoredSessionId = id;
                     return { id, model: { getRequests: () => [] } };
+                },
+                sendRequest: async (sessionId: string, request: { text: string; displayText?: string; variables?: AIVariableResolutionRequest[] }) => {
+                    sendRequestCalls.push({ sessionId, request });
+                    return {
+                        requestCompleted: Promise.resolve({ id: `sent-${sendRequestCalls.length}` }),
+                        responseCreated: Promise.resolve({
+                            response: { content: [] },
+                            isComplete: true,
+                            isError: false,
+                            isCanceled: false,
+                            onDidChange: () => ({ dispose(): void { /* noop */ } })
+                        }),
+                        responseCompleted: Promise.resolve(undefined)
+                    };
                 }
             } as unknown as ChatService);
             bind(ChatSessionStore).toConstantValue({
@@ -227,6 +245,259 @@ describe('ArschatChatWidget', () => {
         const options = Array.from(select!.querySelectorAll('option')).map(o => o.textContent);
         expect(options).toContain('ArsChat');
         expect(options).toContain('Coder');
+    });
+
+    it('does not render the pending attachment row when there are no images', () => {
+        const element = render(widget.render());
+        expect(element.container.querySelector('.arschat-attachments')).toBeFalsy();
+    });
+
+    it('renders pending pasted or dropped images as thumbnails above the input', () => {
+        const first = pendingImage('one', 'image/png', 'one.png');
+        const second = pendingImage('two', 'image/jpeg', 'two.jpg');
+        asAny(widget).pendingImages = [first, second];
+
+        const element = render(widget.render());
+        const row = element.container.querySelector('.arschat-attachments');
+        const thumbs = Array.from(element.container.querySelectorAll('img.arschat-attachment-thumb')) as HTMLImageElement[];
+
+        expect(row).toBeTruthy();
+        expect(row?.nextElementSibling?.classList.contains('arschat-chat-input-bar')).toBe(true);
+        expect(element.container.querySelectorAll('.arschat-attachment')).toHaveLength(2);
+        expect(thumbs.map(img => img.getAttribute('src'))).toEqual([first.previewUrl, second.previewUrl]);
+        expect(thumbs.map(img => img.getAttribute('alt'))).toEqual(['one.png', 'two.jpg']);
+    });
+
+    it('removes only the clicked pending image and preserves typed input', () => {
+        const first = pendingImage('one', 'image/png', 'one.png');
+        const second = pendingImage('two', 'image/jpeg', 'two.jpg');
+        asAny(widget).pendingImages = [first, second];
+        asAny(widget).inputValue = 'typed draft';
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            const element = render(widget.render());
+            const buttons = element.container.querySelectorAll('.arschat-attachment-remove');
+            fireEvent.click(buttons[0]);
+            element.rerender(widget.render());
+
+            expect(updateSpy).toHaveBeenCalledTimes(1);
+            expect(asAny(widget).pendingImages).toEqual([second]);
+            expect(asAny(widget).inputValue).toBe('typed draft');
+            const thumbs = Array.from(element.container.querySelectorAll('img.arschat-attachment-thumb')) as HTMLImageElement[];
+            expect(thumbs).toHaveLength(1);
+            expect(thumbs[0].getAttribute('src')).toBe(second.previewUrl);
+        } finally {
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('computes resize targets with a long-edge clamp', () => {
+        expect(computeResizeTarget(2000, 1000, 1568)).toEqual({ width: 1568, height: 784, needsResize: true });
+        expect(computeResizeTarget(1000, 2000, 1568)).toEqual({ width: 784, height: 1568, needsResize: true });
+        expect(computeResizeTarget(1568, 1568, 1568)).toEqual({ width: 1568, height: 1568, needsResize: false });
+        expect(computeResizeTarget(800, 600, 1568)).toEqual({ width: 800, height: 600, needsResize: false });
+        expect(computeResizeTarget(10000, 10000, 1568)).toEqual({ width: 1568, height: 1568, needsResize: true });
+        expect(computeResizeTarget(10000, 1, 1568)).toEqual({ width: 1568, height: 1, needsResize: true });
+    });
+
+    it('keeps invalid dimensions from dividing by zero', () => {
+        expect(computeResizeTarget(0, 600, 1568)).toEqual({ width: 0, height: 600, needsResize: false });
+        expect(computeResizeTarget(800, 0, 1568)).toEqual({ width: 800, height: 0, needsResize: false });
+        expect(() => computeResizeTarget(800, 600, 0)).toThrow(/maxLongEdge/);
+    });
+
+    it('excludes GIF images from send-time resizing', () => {
+        expect(shouldResizeImageMimeType('image/gif')).toBe(false);
+        expect(shouldResizeImageMimeType('IMAGE/GIF; charset=binary')).toBe(false);
+        expect(shouldResizeImageMimeType('image/png')).toBe(true);
+    });
+
+    it('resizes oversized images through Image and canvas', async () => {
+        const restoreImage = installFakeImage(2000, 1000);
+        const originalCreateElement = document.createElement.bind(document);
+        const drawImage = jest.fn();
+        const fakeCanvas = {
+            width: 0,
+            height: 0,
+            getContext: jest.fn((contextId: string) => contextId === '2d' ? { drawImage } : null),
+            toDataURL: jest.fn((type: string) => `data:${type};base64,RESIZED`)
+        };
+        const createElement = jest.spyOn(document, 'createElement').mockImplementation(((tagName: string, options?: ElementCreationOptions) =>
+            tagName.toLowerCase() === 'canvas'
+                ? fakeCanvas as unknown as HTMLElement
+                : originalCreateElement(tagName, options)) as typeof document.createElement);
+
+        try {
+            const resized = await asAny(widget).resizeImageIfNeeded(pendingImage('ORIGINAL', 'image/jpeg', 'wide.jpg'));
+
+            expect(fakeCanvas.width).toBe(1568);
+            expect(fakeCanvas.height).toBe(784);
+            expect(drawImage).toHaveBeenCalledTimes(1);
+            expect(drawImage.mock.calls[0].slice(1)).toEqual([0, 0, 1568, 784]);
+            expect(fakeCanvas.toDataURL).toHaveBeenCalledWith('image/jpeg');
+            expect(resized).toEqual({
+                data: 'RESIZED',
+                mimeType: 'image/jpeg',
+                name: 'wide.jpg',
+                previewUrl: 'data:image/jpeg;base64,RESIZED'
+            });
+        } finally {
+            createElement.mockRestore();
+            restoreImage();
+        }
+    });
+
+    it('passes through images that are already within the limit', async () => {
+        const restoreImage = installFakeImage(800, 600);
+        const createElement = jest.spyOn(document, 'createElement');
+        const original = pendingImage('SMALL', 'image/png', 'small.png');
+        try {
+            await expect(asAny(widget).resizeImageIfNeeded(original)).resolves.toBe(original);
+            expect(createElement).not.toHaveBeenCalled();
+        } finally {
+            createElement.mockRestore();
+            restoreImage();
+        }
+    });
+
+    it('passes GIF images through without constructing Image or canvas', async () => {
+        const originalImage = (global as any).Image;
+        const imageCtor = jest.fn();
+        (global as any).Image = imageCtor;
+        const createElement = jest.spyOn(document, 'createElement');
+        const gif = pendingImage('GIFDATA', 'image/gif', 'animated.gif');
+        try {
+            await expect(asAny(widget).resizeImageIfNeeded(gif)).resolves.toBe(gif);
+            expect(imageCtor).not.toHaveBeenCalled();
+            expect(createElement).not.toHaveBeenCalled();
+        } finally {
+            createElement.mockRestore();
+            (global as any).Image = originalImage;
+        }
+    });
+
+    it('clears pending images before awaiting send-time resize and sends image variables afterward', async () => {
+        const img = pendingImage('ORIGINAL', 'image/png', 'large.png');
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).inputValue = 'look';
+        asAny(widget).pendingImages = [img];
+        let resolveResize: (value: unknown) => void = () => undefined;
+        const resizePromise = new Promise(resolve => { resolveResize = resolve; });
+        const resizeSpy = jest.spyOn(asAny(widget), 'resizeImageIfNeeded').mockReturnValue(resizePromise);
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+        const consoleLog = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+        try {
+            const sendPromise = asAny(widget).send();
+
+            expect(asAny(widget).pendingImages).toEqual([]);
+            expect(asAny(widget).messages[0].images).toEqual([img.previewUrl]);
+            expect(sendRequestCalls).toHaveLength(0);
+            expect(resizeSpy).toHaveBeenCalledWith(img);
+
+            resolveResize(img);
+            await sendPromise;
+
+            expect(sendRequestCalls).toHaveLength(1);
+            const variables = sendRequestCalls[0].request.variables ?? [];
+            expect(variables).toHaveLength(1);
+            expect(ImageContextVariable.parseRequest(variables[0])).toMatchObject({
+                data: 'ORIGINAL',
+                mimeType: 'image/png',
+                name: 'large.png'
+            });
+        } finally {
+            resizeSpy.mockRestore();
+            updateSpy.mockRestore();
+            consoleLog.mockRestore();
+        }
+    });
+
+    it('sends original image data when send-time resize fails', async () => {
+        const img = pendingImage('ORIGINAL', 'image/png', 'large.png');
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).inputValue = 'look';
+        asAny(widget).pendingImages = [img];
+        const error = new Error('decode failed');
+        const resizeSpy = jest.spyOn(asAny(widget), 'resizeImageIfNeeded').mockRejectedValue(error);
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const consoleLog = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            await asAny(widget).send();
+
+            expect(resizeSpy).toHaveBeenCalledWith(img);
+            expect(warnSpy).toHaveBeenCalledWith('[arschat-chat] failed to resize image; sending original image data', error);
+            expect(sendRequestCalls).toHaveLength(1);
+            const variables = sendRequestCalls[0].request.variables ?? [];
+            expect(variables).toHaveLength(1);
+            expect(ImageContextVariable.parseRequest(variables[0])).toMatchObject({
+                data: 'ORIGINAL',
+                mimeType: 'image/png',
+                name: 'large.png'
+            });
+        } finally {
+            resizeSpy.mockRestore();
+            warnSpy.mockRestore();
+            consoleLog.mockRestore();
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('uses the session captured before send-time resize completes', async () => {
+        const img = pendingImage('ORIGINAL', 'image/png', 'large.png');
+        asAny(widget).sessionId = 'sess-start';
+        asAny(widget).inputValue = 'look';
+        asAny(widget).pendingImages = [img];
+        let resolveResize: (value: unknown) => void = () => undefined;
+        const resizePromise = new Promise(resolve => { resolveResize = resolve; });
+        const resizeSpy = jest.spyOn(asAny(widget), 'resizeImageIfNeeded').mockReturnValue(resizePromise);
+        const consoleLog = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            const sendPromise = asAny(widget).send();
+            asAny(widget).sessionId = 'sess-switched';
+
+            resolveResize(img);
+            await sendPromise;
+
+            expect(sendRequestCalls).toHaveLength(1);
+            expect(sendRequestCalls[0].sessionId).toBe('sess-start');
+        } finally {
+            resizeSpy.mockRestore();
+            consoleLog.mockRestore();
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('does not send when the selected model changes during send-time resize', async () => {
+        const img = pendingImage('ORIGINAL', 'image/png', 'large.png');
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).provider = 'anthropic';
+        asAny(widget).model = 'claude-start';
+        asAny(widget).inputValue = 'look';
+        asAny(widget).pendingImages = [img];
+        let resolveResize: (value: unknown) => void = () => undefined;
+        const resizePromise = new Promise(resolve => { resolveResize = resolve; });
+        const resizeSpy = jest.spyOn(asAny(widget), 'resizeImageIfNeeded').mockReturnValue(resizePromise);
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            const sendPromise = asAny(widget).send();
+            asAny(widget).model = 'claude-next';
+
+            resolveResize(img);
+            await sendPromise;
+
+            expect(sendRequestCalls).toHaveLength(0);
+            expect(asAny(widget).sending).toBe(false);
+        } finally {
+            resizeSpy.mockRestore();
+            updateSpy.mockRestore();
+        }
     });
 
     it('builds OpenAI-compatible /models URLs and parses model ids', () => {
@@ -497,6 +768,30 @@ describe('ArschatChatWidget', () => {
         return w as any;
     }
 
+    function pendingImage(data: string, mimeType = 'image/png', name = 'image.png') {
+        return { data, mimeType, name, previewUrl: `data:${mimeType};base64,${data}` };
+    }
+
+    function installFakeImage(width: number, height: number): () => void {
+        const originalImage = (global as any).Image;
+        class FakeImage {
+            onload: (() => void) | null = null;
+            onerror: (() => void) | null = null;
+            naturalWidth = width;
+            naturalHeight = height;
+            width = width;
+            height = height;
+
+            set src(_src: string) {
+                queueMicrotask(() => this.onload?.());
+            }
+        }
+        (global as any).Image = FakeImage;
+        return () => {
+            (global as any).Image = originalImage;
+        };
+    }
+
     /** Register a fake tool so the widget's ToolInvocationRegistry lookup resolves. */
     function registerTool(id: string, confirmAlwaysAllow?: boolean | string): void {
         registeredTools.set(id, {
@@ -505,7 +800,7 @@ describe('ArschatChatWidget', () => {
         } as unknown as ToolRequest);
     }
 
-    it('suppresses controlled textarea update during IME composition', () => {
+    it('suppresses textarea update during IME composition', () => {
         // Spy the base-class render (super.update): the override defers it while composing.
         const superUpdate = jest.spyOn(ReactWidget.prototype, 'update').mockImplementation(() => undefined);
         superUpdate.mockClear();
@@ -515,6 +810,43 @@ describe('ArschatChatWidget', () => {
         expect(superUpdate).not.toHaveBeenCalled();
         expect(asAny(widget).pendingUpdateWhileComposing).toBe(true);
         superUpdate.mockRestore();
+    });
+
+    it('updates the mounted chat textarea when a suggestion sets input programmatically', () => {
+        const element = render(widget.render());
+        const textarea = element.container.querySelector('#arschat-chat-input') as HTMLTextAreaElement | null;
+        expect(textarea).toBeTruthy();
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            asAny(widget).selectSuggestion({ id: 'ask', trigger: '/ask', name: 'Ask', description: 'Ask' });
+
+            expect(updateSpy).toHaveBeenCalledTimes(1);
+            expect(asAny(widget).inputValue).toBe('/ask ');
+            expect(textarea!.value).toBe('/ask ');
+        } finally {
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('does not overwrite user-typed chat textarea DOM value on rerender', () => {
+        const element = render(widget.render());
+        const textarea = element.container.querySelector('#arschat-chat-input') as HTMLTextAreaElement | null;
+        expect(textarea).toBeTruthy();
+        textarea!.value = '譌･譛ｬ隱槫・蜉帙・途荳ｭ';
+        expect(asAny(widget).inputValue).toBe('');
+        const superUpdate = jest.spyOn(ReactWidget.prototype, 'update').mockImplementation(() => undefined);
+
+        try {
+            widget.update();
+            element.rerender(widget.render());
+
+            expect(superUpdate).toHaveBeenCalledTimes(1);
+            expect(textarea!.value).toBe('譌･譛ｬ隱槫・蜉帙・途荳ｭ');
+            expect(asAny(widget).inputValue).toBe('');
+        } finally {
+            superUpdate.mockRestore();
+        }
     });
 
     it('defers async-path renders during IME composition and flushes them once composing ends', () => {
@@ -587,6 +919,22 @@ describe('ArschatChatWidget', () => {
         expect(options).toEqual(['qwen/qwen3', 'llama-3']);
         expect(asAny(widget).model).toBe('qwen/qwen3');
         expect(setActiveCalls[setActiveCalls.length - 1]).toEqual({ provider: 'lmstudio', model: 'qwen/qwen3' });
+    });
+
+    it('updates the mounted custom endpoint input when switching custom providers', () => {
+        asAny(widget).provider = 'lmstudio';
+        asAny(widget).syncCustomEndpointState('lmstudio');
+        const element = render(widget.render());
+        const input = element.container.querySelector('#arschat-custom-endpoint-url') as HTMLInputElement | null;
+        expect(input).toBeTruthy();
+        expect(input!.value).toBe('http://localhost:1234/v1');
+
+        customEndpointUrls.set('unsloth', 'http://localhost:9999/v1');
+        asAny(widget).provider = 'unsloth';
+        asAny(widget).syncCustomEndpointState('unsloth');
+
+        expect(asAny(widget).customEndpointDraft).toBe('http://localhost:9999/v1');
+        expect(input!.value).toBe('http://localhost:9999/v1');
     });
 
     it('shows a disabled connection failure option when live model fetch fails', async () => {
@@ -1029,6 +1377,46 @@ describe('ArschatChatWidget', () => {
         expect(asAny(widget).inputValue).toBe('書きかけのドラフト');
     });
 
+    it('regenerate resends the original image variables and restores draft images', async () => {
+        const originalImage = ImageContextVariable.createRequest({ data: 'abc123', mimeType: 'image/png', name: 'original.png' });
+        fakeRequests = [
+            {
+                id: 'r1',
+                request: { text: 'old q1', displayText: undefined, variables: [originalImage] },
+                response: { response: { content: [] } }
+            }
+        ];
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'old q1', requestId: 'r1', images: ['data:image/png;base64,abc123'] },
+            { id: 2, author: 'assistant', text: 'old a1', requestId: 'r1', streaming: false }
+        ];
+        const assistant = asAny(widget).messages[1];
+        const draftImage = pendingImage('draft', 'image/jpeg', 'draft.jpg');
+        asAny(widget).inputValue = 'draft text';
+        asAny(widget).pendingImages = [draftImage];
+        let sentImages: any[] | undefined;
+        let sentText: string | undefined;
+        asAny(widget).send = async () => {
+            sentText = asAny(widget).inputValue;
+            sentImages = [...asAny(widget).pendingImages];
+            asAny(widget).inputValue = '';
+            asAny(widget).pendingImages = [];
+        };
+
+        await asAny(widget).regenerate(assistant);
+
+        expect(sentText).toBe('old q1');
+        expect(sentImages).toEqual([{
+            data: 'abc123',
+            mimeType: 'image/png',
+            name: 'original.png',
+            previewUrl: 'data:image/png;base64,abc123'
+        }]);
+        expect(asAny(widget).pendingImages).toEqual([draftImage]);
+        expect(asAny(widget).inputValue).toBe('draft text');
+    });
+
     it('opens edit mode with the message text as the edit draft', () => {
         const assistant = seedTurn('req-1');
         asAny(widget).startEdit(assistant);
@@ -1127,6 +1515,60 @@ describe('ArschatChatWidget', () => {
         }]);
         expect(asAny(widget).pendingImages).toEqual([draftImage]);
         expect(asAny(widget).inputValue).toBe('draft text');
+    });
+
+    it('saveUserEdit sends restored images through resize before creating image variables', async () => {
+        const originalImage = ImageContextVariable.createRequest({ data: 'abc123', mimeType: 'image/png', name: 'original.png' });
+        fakeRequests = [
+            {
+                id: 'r1',
+                request: { text: 'old q1', displayText: undefined, variables: [originalImage] },
+                response: { response: { content: [] } }
+            }
+        ];
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).messages = [
+            { id: 1, author: 'user', text: 'old q1', requestId: 'r1', images: ['data:image/png;base64,abc123'] },
+            { id: 2, author: 'assistant', text: 'old a1', requestId: 'r1', streaming: false }
+        ];
+        const userMessage = asAny(widget).messages[0];
+        const draftImage = pendingImage('draft', 'image/jpeg', 'draft.jpg');
+        asAny(widget).inputValue = 'draft text';
+        asAny(widget).pendingImages = [draftImage];
+        const resizeSpy = jest.spyOn(asAny(widget), 'resizeImageIfNeeded').mockImplementation(async (img: any) => ({
+            ...img,
+            data: `resized-${img.data}`,
+            previewUrl: `data:${img.mimeType};base64,resized-${img.data}`
+        }));
+        const consoleLog = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            await asAny(widget).saveUserEdit(userMessage, 'edited q1');
+
+            expect(resizeSpy).toHaveBeenCalledTimes(1);
+            expect(resizeSpy).toHaveBeenCalledWith(expect.objectContaining({
+                data: 'abc123',
+                mimeType: 'image/png',
+                name: 'original.png',
+                previewUrl: 'data:image/png;base64,abc123'
+            }));
+            expect(sendRequestCalls).toHaveLength(1);
+            expect(sendRequestCalls[0].request.text).toBe('edited q1');
+            const variables = sendRequestCalls[0].request.variables ?? [];
+            expect(variables).toHaveLength(1);
+            expect(ImageContextVariable.parseRequest(variables[0])).toMatchObject({
+                data: 'resized-abc123',
+                mimeType: 'image/png',
+                name: 'original.png'
+            });
+            expect(asAny(widget).pendingImages).toEqual([draftImage]);
+            expect(asAny(widget).inputValue).toBe('draft text');
+        } finally {
+            resizeSpy.mockRestore();
+            consoleLog.mockRestore();
+            updateSpy.mockRestore();
+        }
     });
 
     it('hides edit for image user messages whose variables cannot be safely restored', () => {

@@ -58,6 +58,7 @@ import { ArschatChatUiService } from './arschat-chat-ui-service';
 import { removeRequestFromModel, RequestTreeModel } from './arschat-request-tree';
 import { ArschatStatsStore } from './arschat-stats-store';
 import { computeMessageStats, hasDisplayableStats, ResponseTokenUsageLike } from './arschat-message-stats';
+import { computeResizeTarget, DEFAULT_IMAGE_MAX_LONG_EDGE, ResizeTarget, shouldResizeImageMimeType } from './arschat-image-resize';
 
 interface PendingImage {
     /** base64 data (no data: prefix) */
@@ -171,7 +172,10 @@ export class ArschatChatWidget extends ReactWidget {
     protected nextId = 1;
     protected inputValue = '';
     protected editDraft = '';
+    protected readonly inputRef = React.createRef<HTMLTextAreaElement>();
+    protected readonly editTextareaRef = React.createRef<HTMLTextAreaElement>();
     protected sending = false;
+    protected sendSeq = 0;
     protected pendingImages: PendingImage[] = [];
     protected dragActive = false;
 
@@ -183,6 +187,7 @@ export class ArschatChatWidget extends ReactWidget {
     protected customModelLoadStates: Map<ArschatProviderKind, 'idle' | 'loading' | 'error'> = new Map();
     protected customEndpointUrls: Map<ArschatProviderKind, string> = new Map();
     protected customEndpointDraft = '';
+    protected readonly endpointInputRef = React.createRef<HTMLInputElement>();
     protected customEndpointError = '';
     protected liveCustomModelRequestSeq = 0;
     protected liveCustomModelRequestTokens: Map<ArschatProviderKind, number> = new Map();
@@ -302,6 +307,30 @@ export class ArschatChatWidget extends ReactWidget {
         }
     }
 
+    protected setInputValue(value: string): void {
+        this.inputValue = value;
+        const el = this.inputRef.current;
+        if (el && el.value !== value) {
+            el.value = value;
+        }
+    }
+
+    protected setEditDraft(value: string): void {
+        this.editDraft = value;
+        const el = this.editTextareaRef.current;
+        if (el && el.value !== value) {
+            el.value = value;
+        }
+    }
+
+    protected setCustomEndpointDraft(value: string): void {
+        this.customEndpointDraft = value;
+        const el = this.endpointInputRef.current;
+        if (el && el.value !== value) {
+            el.value = value;
+        }
+    }
+
     // ---------------------------------------------------------------- models
 
     protected async refreshModels(): Promise<void> {
@@ -328,7 +357,7 @@ export class ArschatChatWidget extends ReactWidget {
             this.configuredCustomModelsByProvider.set(kind, model);
         }
         if (this.provider === kind) {
-            this.customEndpointDraft = url;
+            this.setCustomEndpointDraft(url);
             this.customEndpointError = '';
             if (model) {
                 this.model = model;
@@ -497,7 +526,7 @@ export class ArschatChatWidget extends ReactWidget {
                     return;
                 }
                 this.customEndpointUrls.set(kind, normalized);
-                this.customEndpointDraft = normalized;
+                this.setCustomEndpointDraft(normalized);
                 this.customEndpointError = '';
                 await this.refreshLiveCustomModels(kind);
             })
@@ -537,7 +566,7 @@ export class ArschatChatWidget extends ReactWidget {
         this.sessionId = undefined;
         this.messages = [];
         this.pendingImages = [];
-        this.inputValue = '';
+        this.setInputValue('');
         this.uiService.notifySessionChanged(undefined);
         this.update();
         this.focusInput();
@@ -615,6 +644,49 @@ export class ArschatChatWidget extends ReactWidget {
             reader.onerror = () => reject(new Error('failed to read image'));
             reader.readAsDataURL(file);
         });
+    }
+
+    protected async resizeImageIfNeeded(img: PendingImage): Promise<PendingImage> {
+        if (!shouldResizeImageMimeType(img.mimeType)) {
+            return img;
+        }
+        const image = await this.loadImageElement(img.previewUrl);
+        const width = image.naturalWidth || image.width;
+        const height = image.naturalHeight || image.height;
+        const target = computeResizeTarget(width, height, DEFAULT_IMAGE_MAX_LONG_EDGE);
+        if (!target.needsResize) {
+            return img;
+        }
+        return this.drawResizedImage(img, image, target);
+    }
+
+    protected loadImageElement(src: string): Promise<HTMLImageElement> {
+        return new Promise<HTMLImageElement>((resolve, reject) => {
+            const image = new Image();
+            image.onload = () => resolve(image);
+            image.onerror = () => reject(new Error('failed to load image'));
+            image.src = src;
+        });
+    }
+
+    protected drawResizedImage(img: PendingImage, source: CanvasImageSource, target: ResizeTarget): PendingImage {
+        const canvas = document.createElement('canvas');
+        canvas.width = target.width;
+        canvas.height = target.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            throw new Error('failed to resize image');
+        }
+        ctx.drawImage(source, 0, 0, target.width, target.height);
+        const previewUrl = canvas.toDataURL(img.mimeType);
+        const comma = previewUrl.indexOf(',');
+        const mimeType = /^data:([^;,]+)[;,]/.exec(previewUrl)?.[1] ?? img.mimeType;
+        return {
+            ...img,
+            data: comma >= 0 ? previewUrl.substring(comma + 1) : previewUrl,
+            mimeType,
+            previewUrl
+        };
     }
 
     protected removePendingImage(index: number): void {
@@ -739,6 +811,9 @@ export class ArschatChatWidget extends ReactWidget {
         if (this.sending && this.sessionId && this.inflightRequestId) {
             this.chatService.cancelRequest(this.sessionId, this.inflightRequestId).catch(() => { /* noop */ });
         }
+        if (this.sending) {
+            this.sendSeq++;
+        }
         this.sending = false;
         this.inflightRequestId = undefined;
     }
@@ -755,6 +830,11 @@ export class ArschatChatWidget extends ReactWidget {
             return;
         }
         this.sending = true;
+        const token = ++this.sendSeq;
+        const sessionId = this.getSessionId();
+        const modelId = this.switchService.resolveActiveModelId();
+        const provider = this.provider;
+        const model = this.model;
         this.slashSuggestions = [];
 
         // Slash-command skill expansion (M4): if the input starts with a known
@@ -764,11 +844,8 @@ export class ArschatChatWidget extends ReactWidget {
         const requestText = expansion ? expansion.expanded : text;
         const displayText = expansion ? expansion.display : undefined;
 
-        const attachedPreviews = this.pendingImages.map(img => img.previewUrl);
-        const variables: AIVariableResolutionRequest[] = this.pendingImages.map(img =>
-            ImageContextVariable.createRequest({ data: img.data, mimeType: img.mimeType, name: img.name })
-        );
-        const imagesForModel = [...this.pendingImages];
+        const imagesToSend = [...this.pendingImages];
+        const attachedPreviews = imagesToSend.map(img => img.previewUrl);
 
         const userMessage: UiMessage = {
             id: this.nextId++,
@@ -778,7 +855,7 @@ export class ArschatChatWidget extends ReactWidget {
             images: attachedPreviews.length > 0 ? attachedPreviews : undefined
         };
         this.messages.push(userMessage);
-        this.inputValue = '';
+        this.setInputValue('');
         this.pendingImages = [];
 
         const assistant: UiMessage = { id: this.nextId++, author: 'assistant', text: '', streaming: true, thinkOpen: false };
@@ -790,10 +867,17 @@ export class ArschatChatWidget extends ReactWidget {
         const startedAt = Date.now();
 
         try {
-            const modelId = this.switchService.resolveActiveModelId();
-            console.log(`[arschat-chat] sending request (provider='${this.provider}', model='${this.model}', persona='${this.activePersonaId}', skill=${expansion ? 'yes' : 'no'}, resolved LanguageModel id='${modelId ?? '<none>'}', images=${imagesForModel.length})`);
+            const imagesForModel = await Promise.all(imagesToSend.map(img => this.resizeImageFailOpen(img)));
+            if (this.isDisposed || token !== this.sendSeq || provider !== this.provider || model !== this.model || modelId !== this.switchService.resolveActiveModelId()) {
+                assistant.streaming = false;
+                return;
+            }
+            const variables: AIVariableResolutionRequest[] = imagesForModel.map(img =>
+                ImageContextVariable.createRequest({ data: img.data, mimeType: img.mimeType, name: img.name })
+            );
+            console.log(`[arschat-chat] sending request (provider='${provider}', model='${model}', persona='${this.activePersonaId}', skill=${expansion ? 'yes' : 'no'}, resolved LanguageModel id='${modelId ?? '<none>'}', images=${imagesForModel.length})`);
             const invocation = await this.chatService.sendRequest(
-                this.getSessionId(),
+                sessionId,
                 { text: requestText, displayText, variables: variables.length > 0 ? variables : undefined }
             );
             if (!invocation) {
@@ -835,10 +919,23 @@ export class ArschatChatWidget extends ReactWidget {
             assistant.text = `(error: ${e instanceof Error ? e.message : String(e)})`;
             assistant.streaming = false;
         } finally {
-            this.sending = false;
-            this.inflightRequestId = undefined;
-            this.flushRender();
-            this.uiService.notifySessionsMutated();
+            if (token === this.sendSeq) {
+                this.sending = false;
+                this.inflightRequestId = undefined;
+                if (!this.isDisposed) {
+                    this.flushRender();
+                    this.uiService.notifySessionsMutated();
+                }
+            }
+        }
+    }
+
+    protected async resizeImageFailOpen(img: PendingImage): Promise<PendingImage> {
+        try {
+            return await this.resizeImageIfNeeded(img);
+        } catch (error: unknown) {
+            console.warn('[arschat-chat] failed to resize image; sending original image data', error);
+            return img;
         }
     }
 
@@ -1091,18 +1188,25 @@ export class ArschatChatWidget extends ReactWidget {
         if (!userText) {
             return;
         }
+        const imagesToResend = this.pendingImagesFromRequest(msg.requestId);
+        if (!imagesToResend && userMsg?.images && userMsg.images.length > 0) {
+            return;
+        }
         // send() drives the resend off `this.inputValue` and clears it once read, so
         // overwriting the input to carry the original user text would silently discard
         // anything the user had started typing. Stash the draft, resend, then restore
         // it so the input box is exactly as the user left it (M6 e-26 review fix).
         const draft = this.inputValue;
+        const pendingImageDraft = [...this.pendingImages];
         this.dropTurnFromModel(msg.requestId);
         this.messages = this.messages.filter(m => m.requestId !== msg.requestId);
-        this.inputValue = userText;
+        this.setInputValue(userText);
+        this.pendingImages = imagesToResend ?? [];
         try {
             await this.send();
         } finally {
-            this.inputValue = draft;
+            this.setInputValue(draft);
+            this.pendingImages = pendingImageDraft;
             this.update();
         }
     }
@@ -1117,7 +1221,7 @@ export class ArschatChatWidget extends ReactWidget {
             m.editing = false;
         }
         msg.editing = true;
-        this.editDraft = msg.text;
+        this.setEditDraft(msg.text);
         this.update();
         setTimeout(() => {
             const ta = document.getElementById(`arschat-message-edit-${msg.id}`) as HTMLTextAreaElement | null;
@@ -1132,7 +1236,7 @@ export class ArschatChatWidget extends ReactWidget {
     protected cancelEdit(msg: UiMessage): void {
         this.flushComposingUpdate();
         msg.editing = false;
-        this.editDraft = '';
+        this.setEditDraft('');
         this.update();
     }
 
@@ -1175,13 +1279,13 @@ export class ArschatChatWidget extends ReactWidget {
         }
         await this.persistCurrentSession();
         this.messages = this.messages.filter(m => !trailingRequestIds.includes(m.requestId ?? ''));
-        this.editDraft = '';
-        this.inputValue = newText;
+        this.setEditDraft('');
+        this.setInputValue(newText);
         this.pendingImages = imagesToResend;
         try {
             await this.send();
         } finally {
-            this.inputValue = draft;
+            this.setInputValue(draft);
             this.pendingImages = pendingImageDraft;
             this.update();
         }
@@ -1197,7 +1301,7 @@ export class ArschatChatWidget extends ReactWidget {
         mutable.addContent(new TextChatResponseContentImpl(newText));
         msg.text = newText;
         msg.editing = false;
-        this.editDraft = '';
+        this.setEditDraft('');
         this.syncToolCalls(msg, msg.response);
         this.update();
         await this.persistCurrentSession();
@@ -1214,11 +1318,11 @@ export class ArschatChatWidget extends ReactWidget {
             return;
         }
         const draft = this.inputValue;
-        this.inputValue = CONTINUE_PROMPT;
+        this.setInputValue(CONTINUE_PROMPT);
         try {
             await this.send();
         } finally {
-            this.inputValue = draft;
+            this.setInputValue(draft);
             this.update();
         }
     }
@@ -1401,7 +1505,7 @@ export class ArschatChatWidget extends ReactWidget {
 
     /** Accept a suggestion: set the input to `/trigger ` and dismiss the popup. */
     protected selectSuggestion(skill: Skill): void {
-        this.inputValue = `${skill.trigger} `;
+        this.setInputValue(`${skill.trigger} `);
         this.slashSuggestions = [];
         this.suggestionIndex = 0;
         this.update();
@@ -1542,7 +1646,8 @@ export class ArschatChatWidget extends ReactWidget {
                             id='arschat-custom-endpoint-url'
                             className='theia-input arschat-custom-endpoint-url'
                             type='text'
-                            value={this.customEndpointDraft}
+                            ref={this.endpointInputRef}
+                            defaultValue={this.customEndpointDraft}
                             spellCheck={false}
                             onChange={e => this.onCustomEndpointDraftChange(e.currentTarget.value)}
                             onKeyDown={e => this.onCustomEndpointKeyDown(e)}
@@ -1605,7 +1710,8 @@ export class ArschatChatWidget extends ReactWidget {
                         id='arschat-chat-input'
                         className='theia-input arschat-chat-input'
                         placeholder='メッセージを入力... (/ でスキル、画像は貼り付け/ドロップ)'
-                        value={this.inputValue}
+                        ref={this.inputRef}
+                        defaultValue={this.inputValue}
                         disabled={this.sending}
                         rows={1}
                         onChange={e => this.onInputChange(e.target.value)}
@@ -1642,7 +1748,8 @@ export class ArschatChatWidget extends ReactWidget {
                 <textarea
                     id={`arschat-message-edit-${msg.id}`}
                     className='theia-input arschat-message-edit-textarea'
-                    value={this.editDraft}
+                    ref={this.editTextareaRef}
+                    defaultValue={this.editDraft}
                     onChange={e => this.onEditDraftChange(e.currentTarget.value)}
                     onKeyDown={e => {
                         const imeActive = this.isImeActive(e);
