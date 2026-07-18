@@ -1,10 +1,11 @@
 import 'reflect-metadata';
 import { ContainerModule, Container } from '@theia/core/shared/inversify';
+import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
 import { ArschatChatWidget } from './arschat-chat-widget';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatSessionStore } from '@theia/ai-chat/lib/common/chat-session-store';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
-import { ProviderSwitchService } from 'arschat-providers/lib/browser/provider-switch-service';
+import { buildOpenAiModelsUrl, parseOpenAiModelIds, ProviderSwitchService } from 'arschat-providers/lib/browser/provider-switch-service';
 import { PersonaService } from 'arschat-agents/lib/browser/persona-service';
 import { SkillService } from 'arschat-agents/lib/browser/skill-service';
 import { ArschatChatUiService } from './arschat-chat-ui-service';
@@ -14,8 +15,9 @@ import { TextChatResponseContentImpl, ToolCallChatResponseContentImpl } from '@t
 import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-variable';
 import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
 import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
-import { render } from '@testing-library/react';
+import { fireEvent, render } from '@testing-library/react';
 import { act } from 'react';
+import { ArschatProviderKind, OPENAI_CUSTOM_ENDPOINTS_PREF, PREF_ACTIVE_MODEL, PREF_ACTIVE_PROVIDER } from 'arschat-providers/lib/browser/arschat-provider-preferences';
 
 describe('ArschatChatWidget', () => {
 
@@ -35,6 +37,15 @@ describe('ArschatChatWidget', () => {
     let forgottenRequestIds: string[];
     /** what the fake stats store returns from getDurationMs. */
     let storedDurations: Map<string, number>;
+    let activeProvider: ArschatProviderKind;
+    let activeModel: string;
+    let customEndpointModels: Map<ArschatProviderKind, string>;
+    let customEndpointUrls: Map<ArschatProviderKind, string>;
+    let liveCustomModels: Map<ArschatProviderKind, string[]>;
+    let fetchCustomEndpointModels: jest.Mock<Promise<string[]>, [ArschatProviderKind, { signal?: AbortSignal }?]>;
+    let updateCustomEndpointUrl: jest.Mock<Promise<string>, [ArschatProviderKind, string]>;
+    let getModelsForProvider: jest.Mock<Promise<any[]>, [ArschatProviderKind]>;
+    let setActiveCalls: Array<{ provider: ArschatProviderKind; model?: string }>;
 
     beforeEach(async () => {
         registeredTools = new Map<string, ToolRequest>();
@@ -48,15 +59,63 @@ describe('ArschatChatWidget', () => {
         recordedDurations = [];
         forgottenRequestIds = [];
         storedDurations = new Map<string, number>();
+        activeProvider = 'anthropic';
+        activeModel = '';
+        customEndpointModels = new Map<ArschatProviderKind, string>([
+            ['lmstudio', 'local-model'],
+            ['unsloth', 'local-model']
+        ]);
+        customEndpointUrls = new Map<ArschatProviderKind, string>([
+            ['lmstudio', 'http://localhost:1234/v1'],
+            ['unsloth', 'http://localhost:8000/v1']
+        ]);
+        liveCustomModels = new Map<ArschatProviderKind, string[]>();
+        setActiveCalls = [];
+        fetchCustomEndpointModels = jest.fn(async (kind: ArschatProviderKind) => liveCustomModels.get(kind) ?? []);
+        getModelsForProvider = jest.fn(async (_kind: ArschatProviderKind) => [] as any[]);
+        updateCustomEndpointUrl = jest.fn(async (kind: ArschatProviderKind, rawUrl: string) => {
+            const trimmed = rawUrl.trim();
+            let parsed: URL;
+            try {
+                parsed = new URL(trimmed);
+            } catch {
+                throw new Error('URL must start with http:// or https://');
+            }
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+                throw new Error('URL must start with http:// or https://');
+            }
+            if (parsed.search || parsed.hash) {
+                throw new Error('URL must not include query parameters or fragments');
+            }
+            const path = parsed.pathname.replace(/\/+$/, '');
+            parsed.pathname = /\/v1$/i.test(path) ? path : `${path}/v1`;
+            const normalized = parsed.toString();
+            customEndpointUrls.set(kind, normalized);
+            return normalized;
+        });
         const module = new ContainerModule(bind => {
             // Minimal stubs: doInit() is async and fired from postConstruct, but render()
             // works off the widget's own fields, so a bare stub is enough for rendering.
             bind(ProviderSwitchService).toConstantValue({
-                getActiveProvider: () => 'anthropic',
-                getActiveModel: () => '',
-                getModelsForProvider: async () => [],
+                getActiveProvider: () => activeProvider,
+                getActiveModel: () => activeModel,
+                getModelsForProvider,
                 resolveActiveModelId: () => undefined,
-                setActive: async () => undefined,
+                setActive: async (provider: ArschatProviderKind, model?: string) => {
+                    activeProvider = provider;
+                    if (model !== undefined) {
+                        activeModel = model;
+                        if (provider === 'lmstudio' || provider === 'unsloth') {
+                            customEndpointModels.set(provider, model);
+                        }
+                    }
+                    setActiveCalls.push({ provider, model });
+                    return undefined;
+                },
+                getCustomEndpointUrl: (kind: ArschatProviderKind) => customEndpointUrls.get(kind) ?? '',
+                getCustomEndpointModel: (kind: ArschatProviderKind) => customEndpointModels.get(kind) ?? '',
+                fetchCustomEndpointModels,
+                updateCustomEndpointUrl,
                 onDidChange: () => ({ dispose(): void { /* noop */ } })
             } as unknown as ProviderSwitchService);
             // Fake model whose getBranch returns a single-item root branch, so the
@@ -144,6 +203,7 @@ describe('ArschatChatWidget', () => {
         container.load(module);
         await act(async () => {
             widget = container.resolve<ArschatChatWidget>(ArschatChatWidget);
+            await new Promise(resolve => setTimeout(resolve, 0));
         });
     });
 
@@ -167,6 +227,256 @@ describe('ArschatChatWidget', () => {
         const options = Array.from(select!.querySelectorAll('option')).map(o => o.textContent);
         expect(options).toContain('ArsChat');
         expect(options).toContain('Coder');
+    });
+
+    it('builds OpenAI-compatible /models URLs and parses model ids', () => {
+        expect(buildOpenAiModelsUrl('http://localhost:1234')).toBe('http://localhost:1234/v1/models');
+        expect(buildOpenAiModelsUrl('http://localhost:1234/v1/')).toBe('http://localhost:1234/v1/models');
+        expect(buildOpenAiModelsUrl('http://localhost:1234/openai')).toBe('http://localhost:1234/openai/v1/models');
+        expect(parseOpenAiModelIds({
+            data: [
+                { id: 'qwen/qwen3' },
+                { id: 'llama-3' },
+                { id: 'qwen/qwen3' },
+                { id: '' },
+                { object: 'model' }
+            ]
+        })).toEqual(['qwen/qwen3', 'llama-3']);
+        expect(() => buildOpenAiModelsUrl('localhost:1234')).toThrow(/http/);
+        expect(() => buildOpenAiModelsUrl('http://localhost:1234/v1?x=1')).toThrow(/query parameters or fragments/);
+        expect(() => buildOpenAiModelsUrl('http://localhost:1234/v1#models')).toThrow(/query parameters or fragments/);
+        expect(() => parseOpenAiModelIds({ data: {} })).toThrow(/data array/);
+    });
+
+    it('sends custom endpoint API keys when fetching /models', async () => {
+        const service = new ProviderSwitchService() as any;
+        service.preferenceService = {
+            get: () => [{
+                id: 'unsloth',
+                model: 'local-model',
+                url: 'http://localhost:8000/v1',
+                apiKey: '  sk-unsloth-test  '
+            }]
+        };
+        const fetchMock = jest.fn(async () => ({
+            ok: true,
+            json: async () => ({ data: [] })
+        }));
+        const originalFetch = global.fetch;
+        (global as any).fetch = fetchMock;
+        try {
+            await service.fetchCustomEndpointModels('unsloth', { timeoutMs: 1000 });
+            expect(fetchMock).toHaveBeenCalledWith('http://localhost:8000/v1/models', expect.objectContaining({
+                headers: { Authorization: 'Bearer sk-unsloth-test' }
+            }));
+        } finally {
+            (global as any).fetch = originalFetch;
+        }
+    });
+
+    it('sends the global OpenAI API key when a custom endpoint sets apiKey: true', async () => {
+        // Theia semantics: `apiKey: true` means "use the global OpenAI API key"
+        // (ai-features.openAiOfficial.openAiApiKey), not a literal key string.
+        const service = new ProviderSwitchService() as any;
+        service.preferenceService = {
+            get: (key: string, defaultValue?: unknown) => {
+                if (key === OPENAI_CUSTOM_ENDPOINTS_PREF) {
+                    return [{ id: 'unsloth', model: 'local-model', url: 'http://localhost:8000/v1', apiKey: true }];
+                }
+                if (key === 'ai-features.openAiOfficial.openAiApiKey') {
+                    return '  sk-global-key  ';
+                }
+                return defaultValue;
+            }
+        };
+        const fetchMock = jest.fn(async () => ({
+            ok: true,
+            json: async () => ({ data: [] })
+        }));
+        const originalFetch = global.fetch;
+        (global as any).fetch = fetchMock;
+        try {
+            await service.fetchCustomEndpointModels('unsloth', { timeoutMs: 1000 });
+            expect(fetchMock).toHaveBeenCalledWith('http://localhost:8000/v1/models', expect.objectContaining({
+                headers: { Authorization: 'Bearer sk-global-key' }
+            }));
+        } finally {
+            (global as any).fetch = originalFetch;
+        }
+    });
+
+    it('serializes concurrent custom endpoint updates so neither provider\'s write is lost', async () => {
+        // LM Studio and Unsloth share ONE preference array (customOpenAiModels).
+        // Two concurrent read-modify-write updates must not both read the old array
+        // and have the last write revert the other provider's change (lost update).
+        let stored: any[] = [];
+        const pendingWrites: Array<{ value: any[]; resolve: () => void }> = [];
+        const service = new ProviderSwitchService() as any;
+        service.preferenceService = {
+            get: (key: string, defaultValue?: unknown) => key === OPENAI_CUSTOM_ENDPOINTS_PREF ? stored : defaultValue,
+            updateValue: jest.fn((_key: string, value: any[]) => new Promise<void>(resolve => {
+                pendingWrites.push({ value, resolve: () => { stored = value; resolve(); } });
+            }))
+        };
+
+        const lmstudioUpdate = service.updateCustomEndpointUrl('lmstudio', 'http://192.168.1.149:1234');
+        const unslothUpdate = service.updateCustomEndpointUrl('unsloth', 'http://localhost:9999');
+        await Promise.resolve();
+
+        // Only the first update's write started; the second is queued behind it and
+        // will re-read the array only after the first write has landed.
+        expect(pendingWrites).toHaveLength(1);
+        pendingWrites[0].resolve();
+        await lmstudioUpdate;
+        for (let i = 0; i < 10 && pendingWrites.length < 2; i++) {
+            await Promise.resolve();
+        }
+        expect(pendingWrites).toHaveLength(2);
+        pendingWrites[1].resolve();
+        await unslothUpdate;
+
+        // Both providers' changes survive in the final shared array.
+        expect(stored).toHaveLength(2);
+        expect(stored).toEqual(expect.arrayContaining([
+            expect.objectContaining({ id: 'lmstudio', url: 'http://192.168.1.149:1234/v1' }),
+            expect.objectContaining({ id: 'unsloth', url: 'http://localhost:9999/v1' })
+        ]));
+    });
+
+    it('serializes setActive so a slow old call cannot revert a newer selection to a mixed state', async () => {
+        // setActive writes PREF_ACTIVE_PROVIDER, then the endpoint model, then
+        // PREF_ACTIVE_MODEL. Without serialization, an old setActive('lmstudio',
+        // 'qwen') resuming after a newer setActive('anthropic', 'claude') completed
+        // would land provider='anthropic' + model='qwen'. The service-side chain
+        // must make the last-called selection land last.
+        const prefs = new Map<string, unknown>();
+        const pendingSets: Array<{ key: string; value: unknown; resolve: () => void }> = [];
+        const service = new ProviderSwitchService() as any;
+        service.preferenceService = {
+            get: (key: string, defaultValue?: unknown) => prefs.has(key) ? prefs.get(key) : defaultValue,
+            set: jest.fn((key: string, value: unknown) => new Promise<void>(resolve => {
+                pendingSets.push({ key, value, resolve: () => { prefs.set(key, value); resolve(); } });
+            })),
+            updateValue: jest.fn(async (key: string, value: unknown) => { prefs.set(key, value); })
+        };
+        service.settingsService = { updateAgentSettings: jest.fn(async () => undefined) };
+        service.languageModelRegistry = { getLanguageModels: jest.fn(async () => []) };
+        service.logger = { info: jest.fn(), warn: jest.fn() };
+        const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+
+        const oldCall = service.setActive('lmstudio', 'qwen');
+        const newCall = service.setActive('anthropic', 'claude');
+        await flush();
+
+        // The old call's provider write is pending (its resolution is manually
+        // deferred = the "slow" call); the new call is queued behind it and has
+        // not written anything yet.
+        expect(pendingSets.map(w => [w.key, w.value])).toEqual([[PREF_ACTIVE_PROVIDER, 'lmstudio']]);
+        pendingSets[0].resolve();
+        await flush();
+        expect(pendingSets[1]).toMatchObject({ key: PREF_ACTIVE_MODEL, value: 'qwen' });
+        pendingSets[1].resolve();
+        await flush();
+        await oldCall;
+
+        // Only now does the newer call run; resolving its writes lands the final state.
+        await flush();
+        expect(pendingSets[2]).toMatchObject({ key: PREF_ACTIVE_PROVIDER, value: 'anthropic' });
+        pendingSets[2].resolve();
+        await flush();
+        expect(pendingSets[3]).toMatchObject({ key: PREF_ACTIVE_MODEL, value: 'claude' });
+        pendingSets[3].resolve();
+        await newCall;
+
+        // No mixed provider/model state: the newest selection is what persists.
+        expect(prefs.get(PREF_ACTIVE_PROVIDER)).toBe('anthropic');
+        expect(prefs.get(PREF_ACTIVE_MODEL)).toBe('claude');
+    });
+
+    it('queues a listener-driven applyActiveSelection behind an in-flight setActive', async () => {
+        // The preference-change listener calls applyActiveSelection() outside
+        // setActive's own body. Fired between setActive('anthropic', 'claude')'s
+        // provider write and model write, it would read the mixed intermediate
+        // state (provider='anthropic' + stale model='qwen') and could land that on
+        // the agent/onDidChange AFTER the final application. The queued wrapper
+        // must defer it until the whole setActive run has finished.
+        const prefs = new Map<string, unknown>([
+            [PREF_ACTIVE_PROVIDER, 'lmstudio'],
+            [PREF_ACTIVE_MODEL, 'qwen']
+        ]);
+        const pendingSets: Array<{ key: string; value: unknown; resolve: () => void }> = [];
+        const updateAgentSettings = jest.fn(async () => undefined);
+        const service = new ProviderSwitchService() as any;
+        service.preferenceService = {
+            get: (key: string, defaultValue?: unknown) => prefs.has(key) ? prefs.get(key) : defaultValue,
+            set: jest.fn((key: string, value: unknown) => new Promise<void>(resolve => {
+                pendingSets.push({ key, value, resolve: () => { prefs.set(key, value); resolve(); } });
+            })),
+            updateValue: jest.fn(async (key: string, value: unknown) => { prefs.set(key, value); })
+        };
+        service.settingsService = { updateAgentSettings };
+        service.languageModelRegistry = { getLanguageModels: jest.fn(async () => []) };
+        service.logger = { info: jest.fn(), warn: jest.fn() };
+        service.agentId = 'ArsChat';
+        service.agentInstance = { languageModelRequirements: [] };
+        const fired: any[] = [];
+        service.onDidChange((selection: any) => { fired.push(selection); });
+        const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+
+        const setActiveCall = service.setActive('anthropic', 'claude');
+        await flush();
+        expect(pendingSets[0]).toMatchObject({ key: PREF_ACTIVE_PROVIDER, value: 'anthropic' });
+        pendingSets[0].resolve();
+        await flush();
+
+        // Mid-run (provider written, model not yet): the listener fires. It must
+        // NOT apply the mixed anthropic/qwen state now (or ever, last).
+        const listenerApply = service.applyActiveSelection();
+        await flush();
+        expect(fired).toHaveLength(0);
+        expect(updateAgentSettings).not.toHaveBeenCalled();
+
+        expect(pendingSets[1]).toMatchObject({ key: PREF_ACTIVE_MODEL, value: 'claude' });
+        pendingSets[1].resolve();
+        await setActiveCall;
+        const listenerSelection = await listenerApply;
+
+        // Both applications ran after the writes finished; nothing ever saw or
+        // published the stale intermediate model, and the LAST application is the
+        // final anthropic/claude selection.
+        expect(fired.length).toBeGreaterThanOrEqual(2);
+        expect(fired.every(s => s.model === 'claude' && s.provider === 'anthropic')).toBe(true);
+        expect(fired[fired.length - 1]).toEqual({ provider: 'anthropic', model: 'claude', modelId: 'anthropic/claude' });
+        expect(listenerSelection).toEqual({ provider: 'anthropic', model: 'claude', modelId: 'anthropic/claude' });
+        const requirements = updateAgentSettings.mock.calls.map((call: any[]) => call[1].languageModelRequirements[0].identifier);
+        expect(requirements.every((id: string) => id === 'anthropic/claude')).toBe(true);
+        expect(requirements[requirements.length - 1]).toBe('anthropic/claude');
+    });
+
+    it('uses the fixed provider custom endpoint model before stale active model preference values', async () => {
+        const preferences = new Map<string, unknown>([
+            [PREF_ACTIVE_PROVIDER, 'lmstudio'],
+            [PREF_ACTIVE_MODEL, 'claude-3-5-sonnet'],
+            [OPENAI_CUSTOM_ENDPOINTS_PREF, [{
+                id: 'lmstudio',
+                model: 'qwen/qwen3',
+                url: 'http://localhost:1234/v1'
+            }]]
+        ]);
+        const service = new ProviderSwitchService() as any;
+        service.preferenceService = {
+            get: (key: string, defaultValue: unknown) => preferences.has(key) ? preferences.get(key) : defaultValue
+        };
+        service.settingsService = { updateAgentSettings: jest.fn(async () => undefined) };
+        service.languageModelRegistry = { getLanguageModels: jest.fn(async () => []) };
+        service.logger = { info: jest.fn(), warn: jest.fn() };
+
+        let fired: any;
+        service.onDidChange((selection: unknown) => { fired = selection; });
+        const selection = await service.applyActiveSelection();
+
+        expect(selection).toEqual({ provider: 'lmstudio', model: 'qwen/qwen3', modelId: 'lmstudio' });
+        expect(fired).toEqual(selection);
     });
 
     // ---- M5 e-3: tool call cards + approval ----
@@ -194,6 +504,377 @@ describe('ArschatChatWidget', () => {
             handler: async () => '', parameters: { type: 'object', properties: {} }
         } as unknown as ToolRequest);
     }
+
+    it('suppresses controlled textarea update during IME composition', () => {
+        // Spy the base-class render (super.update): the override defers it while composing.
+        const superUpdate = jest.spyOn(ReactWidget.prototype, 'update').mockImplementation(() => undefined);
+        superUpdate.mockClear();
+        asAny(widget).onInputCompositionStart();
+        asAny(widget).onInputChange('に');
+        expect(asAny(widget).inputValue).toBe('に');
+        expect(superUpdate).not.toHaveBeenCalled();
+        expect(asAny(widget).pendingUpdateWhileComposing).toBe(true);
+        superUpdate.mockRestore();
+    });
+
+    it('defers async-path renders during IME composition and flushes them once composing ends', () => {
+        // Any path (refreshLiveCustomModels completing, switchService.onDidChange,
+        // persona/skill updates, streaming) that calls update() directly while an IME
+        // composition is in flight must be coalesced, not re-render the textarea (e-48).
+        const superUpdate = jest.spyOn(ReactWidget.prototype, 'update').mockImplementation(() => undefined);
+        asAny(widget).onInputCompositionStart();
+        superUpdate.mockClear();
+        widget.update();
+        widget.update();
+        expect(superUpdate).not.toHaveBeenCalled();
+        expect(asAny(widget).pendingUpdateWhileComposing).toBe(true);
+        // Ending the composition flushes exactly one coalesced render.
+        asAny(widget).flushComposingUpdate();
+        expect(asAny(widget).composing).toBe(false);
+        expect(asAny(widget).pendingUpdateWhileComposing).toBe(false);
+        expect(superUpdate).toHaveBeenCalledTimes(1);
+        superUpdate.mockRestore();
+    });
+
+    it('syncs and updates the input when IME composition ends', () => {
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+        updateSpy.mockClear();
+        asAny(widget).composing = true;
+        asAny(widget).onInputCompositionEnd({ currentTarget: { value: '日本語' } });
+        expect(asAny(widget).inputValue).toBe('日本語');
+        expect(updateSpy).toHaveBeenCalledTimes(1);
+        updateSpy.mockRestore();
+    });
+
+    it('does not send on IME Enter but still sends on normal Enter', () => {
+        const send = jest.fn();
+        asAny(widget).send = send;
+        asAny(widget).onInputKeyDown({
+            key: 'Enter',
+            shiftKey: false,
+            keyCode: 13,
+            nativeEvent: { isComposing: true },
+            preventDefault: jest.fn()
+        });
+        asAny(widget).onInputKeyDown({
+            key: 'Enter',
+            shiftKey: false,
+            keyCode: 229,
+            nativeEvent: { isComposing: false },
+            preventDefault: jest.fn()
+        });
+        expect(send).not.toHaveBeenCalled();
+
+        const preventDefault = jest.fn();
+        asAny(widget).onInputKeyDown({
+            key: 'Enter',
+            shiftKey: false,
+            keyCode: 13,
+            nativeEvent: { isComposing: false },
+            preventDefault
+        });
+        expect(preventDefault).toHaveBeenCalled();
+        expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows live LM Studio models in the dropdown', async () => {
+        liveCustomModels.set('lmstudio', ['qwen/qwen3', 'llama-3']);
+        await act(async () => {
+            await asAny(widget).onProviderChange('lmstudio');
+        });
+        const element = render(widget.render());
+        const options = Array.from(element.container.querySelectorAll('#arschat-model-select option')).map(o => o.textContent);
+        expect(options).toEqual(['qwen/qwen3', 'llama-3']);
+        expect(asAny(widget).model).toBe('qwen/qwen3');
+        expect(setActiveCalls[setActiveCalls.length - 1]).toEqual({ provider: 'lmstudio', model: 'qwen/qwen3' });
+    });
+
+    it('shows a disabled connection failure option when live model fetch fails', async () => {
+        const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        fetchCustomEndpointModels.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+        await act(async () => {
+            await asAny(widget).onProviderChange('lmstudio');
+        });
+        const element = render(widget.render());
+        const option = element.container.querySelector('#arschat-model-select option') as HTMLOptionElement | null;
+        expect(option?.textContent).toBe('(接続できません)');
+        expect(option?.disabled).toBe(true);
+        expect(consoleError).toHaveBeenCalled();
+        consoleError.mockRestore();
+    });
+
+    it('does not persist the previous provider model when a custom provider fetch fails', async () => {
+        const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        activeModel = 'claude-3-5-sonnet';
+        asAny(widget).model = 'claude-3-5-sonnet';
+        fetchCustomEndpointModels.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+        await act(async () => {
+            await asAny(widget).onProviderChange('lmstudio');
+        });
+        expect(setActiveCalls).not.toContainEqual({ provider: 'lmstudio', model: 'claude-3-5-sonnet' });
+        expect(customEndpointModels.get('lmstudio')).toBe('local-model');
+        expect(asAny(widget).model).toBe('local-model');
+        consoleError.mockRestore();
+    });
+
+    it('drops stale live model fetch results for the same provider and URL generation', async () => {
+        let resolveOld: (names: string[]) => void = () => undefined;
+        let resolveNew: (names: string[]) => void = () => undefined;
+        const oldFetch = new Promise<string[]>(resolve => { resolveOld = resolve; });
+        const newFetch = new Promise<string[]>(resolve => { resolveNew = resolve; });
+        fetchCustomEndpointModels
+            .mockImplementationOnce(async () => oldFetch)
+            .mockImplementationOnce(async () => newFetch);
+
+        asAny(widget).provider = 'lmstudio';
+        customEndpointUrls.set('lmstudio', 'http://localhost:1234/v1');
+        let oldRefresh: Promise<void>;
+        await act(async () => {
+            oldRefresh = asAny(widget).refreshLiveCustomModels('lmstudio');
+            await Promise.resolve();
+        });
+
+        customEndpointUrls.set('lmstudio', 'http://192.168.1.149:1234/v1');
+        let newRefresh: Promise<void>;
+        await act(async () => {
+            newRefresh = asAny(widget).refreshLiveCustomModels('lmstudio');
+            await Promise.resolve();
+        });
+        expect(fetchCustomEndpointModels.mock.calls[0][1]?.signal?.aborted).toBe(true);
+
+        await act(async () => {
+            resolveNew(['new-model']);
+            await newRefresh!;
+        });
+        await act(async () => {
+            resolveOld(['old-model']);
+            await oldRefresh!;
+        });
+
+        expect(asAny(widget).liveCustomModelsByProvider.get('lmstudio')).toEqual(['new-model']);
+        expect(asAny(widget).model).toBe('new-model');
+        expect(setActiveCalls).toContainEqual({ provider: 'lmstudio', model: 'new-model' });
+        expect(setActiveCalls).not.toContainEqual({ provider: 'lmstudio', model: 'old-model' });
+    });
+
+    it('aborts live custom model requests for providers left by a provider switch', async () => {
+        let lmstudioSignal: AbortSignal | undefined;
+        let resolveLmstudio: (names: string[]) => void = () => undefined;
+        fetchCustomEndpointModels
+            .mockImplementationOnce(async (_kind, options) => {
+                lmstudioSignal = options?.signal;
+                return new Promise<string[]>(resolve => { resolveLmstudio = resolve; });
+            })
+            .mockImplementationOnce(async () => ['unsloth-model']);
+
+        asAny(widget).provider = 'lmstudio';
+        let oldRefresh: Promise<void>;
+        await act(async () => {
+            oldRefresh = asAny(widget).refreshLiveCustomModels('lmstudio');
+            await Promise.resolve();
+        });
+
+        await act(async () => {
+            await asAny(widget).onProviderChange('unsloth');
+        });
+
+        expect(lmstudioSignal?.aborted).toBe(true);
+        await act(async () => {
+            resolveLmstudio(['stale-model']);
+            await oldRefresh!;
+        });
+        expect(asAny(widget).liveCustomModelsByProvider.get('lmstudio')).toBeUndefined();
+        expect(setActiveCalls).not.toContainEqual({ provider: 'lmstudio', model: 'stale-model' });
+    });
+
+    it('aborts and clears live custom model requests on dispose without updating after disposal', async () => {
+        let resolveFetch: (names: string[]) => void = () => undefined;
+        let signal: AbortSignal | undefined;
+        fetchCustomEndpointModels.mockImplementationOnce(async (_kind, options) => {
+            signal = options?.signal;
+            return new Promise<string[]>(resolve => { resolveFetch = resolve; });
+        });
+        const updateSpy = jest.spyOn(widget, 'update');
+
+        asAny(widget).provider = 'lmstudio';
+        let refresh: Promise<void>;
+        await act(async () => {
+            refresh = asAny(widget).refreshLiveCustomModels('lmstudio');
+            await Promise.resolve();
+        });
+        updateSpy.mockClear();
+
+        widget.dispose();
+        expect(signal?.aborted).toBe(true);
+        expect(asAny(widget).liveCustomModelAbortControllers.size).toBe(0);
+
+        await act(async () => {
+            resolveFetch(['late-model']);
+            await refresh!;
+        });
+        expect(updateSpy).not.toHaveBeenCalled();
+        expect(asAny(widget).liveCustomModelsByProvider.get('lmstudio')).toBeUndefined();
+        updateSpy.mockRestore();
+    });
+
+    it('updates the LM Studio endpoint URL with /v1 completion and refetches models', async () => {
+        liveCustomModels.set('lmstudio', ['old-model']);
+        await act(async () => {
+            await asAny(widget).onProviderChange('lmstudio');
+        });
+        fetchCustomEndpointModels.mockClear();
+        liveCustomModels.set('lmstudio', ['new-model']);
+        asAny(widget).customEndpointDraft = 'http://192.168.1.149:1234';
+        await act(async () => {
+            await asAny(widget).commitCustomEndpointUrl();
+        });
+        expect(updateCustomEndpointUrl).toHaveBeenLastCalledWith('lmstudio', 'http://192.168.1.149:1234');
+        expect(customEndpointUrls.get('lmstudio')).toBe('http://192.168.1.149:1234/v1');
+        expect(fetchCustomEndpointModels).toHaveBeenCalledWith('lmstudio', expect.objectContaining({ signal: expect.any(Object) }));
+        expect(asAny(widget).model).toBe('new-model');
+    });
+
+    it('does not mix a URL commit into a provider selected after the commit started', async () => {
+        let resolveCommit: (url: string) => void = () => undefined;
+        updateCustomEndpointUrl.mockImplementationOnce(async (kind: ArschatProviderKind) => new Promise<string>(resolve => {
+            resolveCommit = url => {
+                customEndpointUrls.set(kind, url);
+                resolve(url);
+            };
+        }));
+
+        asAny(widget).provider = 'lmstudio';
+        asAny(widget).customEndpointDraft = 'http://192.168.1.149:1234';
+        let commit: Promise<void>;
+        await act(async () => {
+            commit = asAny(widget).commitCustomEndpointUrl();
+            await Promise.resolve();
+        });
+        asAny(widget).provider = 'unsloth';
+        asAny(widget).customEndpointDraft = 'http://localhost:8000/v1';
+
+        await act(async () => {
+            resolveCommit('http://192.168.1.149:1234/v1');
+            await commit!;
+        });
+
+        expect(updateCustomEndpointUrl).toHaveBeenLastCalledWith('lmstudio', 'http://192.168.1.149:1234');
+        expect(customEndpointUrls.get('lmstudio')).toBe('http://192.168.1.149:1234/v1');
+        expect(asAny(widget).customEndpointDraft).toBe('http://localhost:8000/v1');
+        expect(fetchCustomEndpointModels).not.toHaveBeenCalled();
+    });
+
+    it('serializes same-provider URL commits so a slow old write cannot revert a newer one', async () => {
+        // Re-edit + re-commit the URL for the same provider while the first write is
+        // still in flight. The writes must land in start order (new one last), so the
+        // backing preference keeps the NEW URL, and only the new commit refetches.
+        let resolveOld: (url: string) => void = () => undefined;
+        updateCustomEndpointUrl.mockImplementationOnce(async (kind: ArschatProviderKind) => new Promise<string>(resolve => {
+            resolveOld = url => { customEndpointUrls.set(kind, url); resolve(url); };
+        }));
+
+        asAny(widget).provider = 'lmstudio';
+        asAny(widget).customEndpointDraft = 'http://old:1234';
+        let oldCommit: Promise<void>;
+        await act(async () => {
+            oldCommit = asAny(widget).commitCustomEndpointUrl();
+            await Promise.resolve();
+        });
+        asAny(widget).customEndpointDraft = 'http://new:1234';
+        let newCommit: Promise<void>;
+        await act(async () => {
+            newCommit = asAny(widget).commitCustomEndpointUrl();
+            await Promise.resolve();
+        });
+        // The new commit's write is queued behind the in-flight old write, not raced.
+        expect(updateCustomEndpointUrl).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            resolveOld('http://old:1234/v1');
+            await Promise.all([oldCommit!, newCommit!]);
+        });
+
+        // The old (stale) commit's UI effects were dropped; the new write ran last,
+        // so the stored URL is the new one - not reverted by the slow old commit.
+        expect(updateCustomEndpointUrl).toHaveBeenCalledTimes(2);
+        expect(updateCustomEndpointUrl).toHaveBeenLastCalledWith('lmstudio', 'http://new:1234');
+        expect(customEndpointUrls.get('lmstudio')).toBe('http://new:1234/v1');
+        expect(asAny(widget).customEndpointDraft).toBe('http://new:1234/v1');
+        expect(fetchCustomEndpointModels).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not treat an in-flight LM Studio commit as stale when an Unsloth commit runs concurrently', async () => {
+        // Commit tokens are per provider: a commit for another provider must not
+        // supersede an in-flight commit for this one.
+        let resolveLmstudio: (url: string) => void = () => undefined;
+        updateCustomEndpointUrl.mockImplementationOnce(async (kind: ArschatProviderKind) => new Promise<string>(resolve => {
+            resolveLmstudio = url => { customEndpointUrls.set(kind, url); resolve(url); };
+        }));
+
+        asAny(widget).provider = 'lmstudio';
+        asAny(widget).customEndpointDraft = 'http://192.168.1.149:1234';
+        let lmstudioCommit: Promise<void>;
+        await act(async () => {
+            lmstudioCommit = asAny(widget).commitCustomEndpointUrl();
+            await Promise.resolve();
+        });
+
+        // A concurrent Unsloth commit starts and completes first.
+        asAny(widget).provider = 'unsloth';
+        asAny(widget).customEndpointDraft = 'http://localhost:9999';
+        await act(async () => {
+            await asAny(widget).commitCustomEndpointUrl();
+        });
+        expect(customEndpointUrls.get('unsloth')).toBe('http://localhost:9999/v1');
+
+        // The user is back on LM Studio when its slow write resolves: the commit is
+        // still the latest for ITS provider, so draft + refetch must apply normally.
+        asAny(widget).provider = 'lmstudio';
+        fetchCustomEndpointModels.mockClear();
+        await act(async () => {
+            resolveLmstudio('http://192.168.1.149:1234/v1');
+            await lmstudioCommit!;
+        });
+
+        expect(asAny(widget).customEndpointDraft).toBe('http://192.168.1.149:1234/v1');
+        expect(customEndpointUrls.get('lmstudio')).toBe('http://192.168.1.149:1234/v1');
+        expect(fetchCustomEndpointModels).toHaveBeenCalledWith('lmstudio', expect.objectContaining({ signal: expect.any(Object) }));
+    });
+
+    it('does not let an overtaken onProviderChange clobber the newer provider selection', async () => {
+        // onProviderChange('lmstudio') suspends in refreshModels; the user switches
+        // to anthropic meanwhile. When the lmstudio run resumes it must bail out
+        // instead of clearing the model / driving setActive for the stale kind.
+        let releaseLmstudioRefresh: () => void = () => undefined;
+        getModelsForProvider.mockImplementationOnce(async () => new Promise<any[]>(resolve => {
+            releaseLmstudioRefresh = () => resolve([]);
+        }));
+
+        let lmstudioChange: Promise<void>;
+        await act(async () => {
+            lmstudioChange = asAny(widget).onProviderChange('lmstudio');
+            await Promise.resolve();
+        });
+
+        // Overtaken by a switch to anthropic that completes first.
+        await act(async () => {
+            await asAny(widget).onProviderChange('anthropic');
+        });
+        asAny(widget).model = 'claude-3-5-sonnet';
+        setActiveCalls.length = 0;
+        fetchCustomEndpointModels.mockClear();
+
+        await act(async () => {
+            releaseLmstudioRefresh();
+            await lmstudioChange!;
+        });
+
+        // The stale lmstudio run left the current (anthropic) selection untouched.
+        expect(asAny(widget).provider).toBe('anthropic');
+        expect(asAny(widget).model).toBe('claude-3-5-sonnet');
+        expect(setActiveCalls).toEqual([]);
+        expect(fetchCustomEndpointModels).not.toHaveBeenCalled();
+    });
 
     /** Force a single tool-call card into the 承認待ち (confirm) state and render it. */
     function renderConfirmCard(toolName: string) {
@@ -367,6 +1048,22 @@ describe('ArschatChatWidget', () => {
         expect(assistant.editing).toBe(false);
         expect(assistant.text).toBe('hi there');
         expect(asAny(widget).editDraft).toBe('');
+    });
+
+    it('does not save edit on IME Enter but saves on normal Enter', () => {
+        const assistant = seedTurn('req-1');
+        asAny(widget).startEdit(assistant);
+        const saveEdit = jest.fn();
+        asAny(widget).saveEdit = saveEdit;
+        const element = render(widget.render());
+        const textarea = element.container.querySelector('.arschat-message-edit-textarea') as HTMLTextAreaElement | null;
+        expect(textarea).toBeTruthy();
+
+        fireEvent.keyDown(textarea!, { key: 'Enter', shiftKey: false, keyCode: 229 });
+        expect(saveEdit).not.toHaveBeenCalled();
+
+        fireEvent.keyDown(textarea!, { key: 'Enter', shiftKey: false, keyCode: 13 });
+        expect(saveEdit).toHaveBeenCalledWith(assistant);
     });
 
     it('saveUserEdit drops the edited and following turns, resends edited text, and restores input draft', async () => {

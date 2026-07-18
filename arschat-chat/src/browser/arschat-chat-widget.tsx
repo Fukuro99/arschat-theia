@@ -178,6 +178,22 @@ export class ArschatChatWidget extends ReactWidget {
     protected provider: ArschatProviderKind = 'anthropic';
     protected model = '';
     protected modelsByProvider: Map<ArschatProviderKind, LanguageModel[]> = new Map();
+    protected configuredCustomModelsByProvider: Map<ArschatProviderKind, string> = new Map();
+    protected liveCustomModelsByProvider: Map<ArschatProviderKind, string[]> = new Map();
+    protected customModelLoadStates: Map<ArschatProviderKind, 'idle' | 'loading' | 'error'> = new Map();
+    protected customEndpointUrls: Map<ArschatProviderKind, string> = new Map();
+    protected customEndpointDraft = '';
+    protected customEndpointError = '';
+    protected liveCustomModelRequestSeq = 0;
+    protected liveCustomModelRequestTokens: Map<ArschatProviderKind, number> = new Map();
+    protected liveCustomModelAbortControllers: Map<ArschatProviderKind, AbortController> = new Map();
+    /** Per-provider monotonic tokens: a newer commit for the same provider supersedes an older one. */
+    protected customEndpointCommitSeqs: Map<ArschatProviderKind, number> = new Map();
+    /** Per-provider chains serializing URL preference writes so they land in start order. */
+    protected customEndpointCommitChains: Map<ArschatProviderKind, Promise<void>> = new Map();
+    protected composing = false;
+    /** A render was requested (from any path) while an IME composition was in flight. */
+    protected pendingUpdateWhileComposing = false;
 
     // ---- persona + skills (M4) ----
     protected personas: Persona[] = [];
@@ -206,8 +222,14 @@ export class ArschatChatWidget extends ReactWidget {
         this.addClass('arschat-chat-widget');
 
         this.provider = this.switchService.getActiveProvider();
-        this.model = this.switchService.getActiveModel();
+        this.model = this.isCustomEndpointProvider(this.provider)
+            ? this.switchService.getCustomEndpointModel(this.provider)
+            : this.switchService.getActiveModel();
         await this.refreshModels();
+        if (this.isCustomEndpointProvider(this.provider)) {
+            this.syncCustomEndpointState(this.provider);
+            await this.refreshLiveCustomModels(this.provider);
+        }
         await this.ensureModelSelected();
 
         this.toDispose.push(this.switchService.onDidChange(sel => {
@@ -246,8 +268,38 @@ export class ArschatChatWidget extends ReactWidget {
         if (this.rafId !== undefined) {
             cancelAnimationFrame(this.rafId);
         }
+        this.abortLiveCustomModelRequests();
         this.toDispose.dispose();
         super.dispose();
+    }
+
+    /**
+     * Single choke point for every repaint. During an IME composition we must not
+     * re-render the controlled textarea/input (React would reset the caret and the
+     * partially-composed characters, causing the double-input bug - e-48). Any path
+     * that requests a render while composing (onXxxChange, but also the async ones:
+     * refreshLiveCustomModels completing, switchService.onDidChange, persona/skill
+     * updates, streaming) is coalesced here and flushed on compositionend.
+     */
+    override update(): void {
+        if (this.composing) {
+            this.pendingUpdateWhileComposing = true;
+            return;
+        }
+        super.update();
+    }
+
+    /**
+     * End the composing state and flush a render that was deferred while composing.
+     * Called from every compositionend/blur/edit-mode transition so a pending update
+     * is never lost when the IME session ends.
+     */
+    protected flushComposingUpdate(): void {
+        this.composing = false;
+        if (this.pendingUpdateWhileComposing) {
+            this.pendingUpdateWhileComposing = false;
+            this.update();
+        }
     }
 
     // ---------------------------------------------------------------- models
@@ -255,6 +307,100 @@ export class ArschatChatWidget extends ReactWidget {
     protected async refreshModels(): Promise<void> {
         for (const p of PROVIDERS) {
             this.modelsByProvider.set(p.kind, await this.switchService.getModelsForProvider(p.kind));
+            if (p.fixedModelId) {
+                this.syncCustomEndpointState(p.kind);
+            }
+        }
+    }
+
+    protected isCustomEndpointProvider(kind: ArschatProviderKind = this.provider): boolean {
+        return !!PROVIDERS.find(p => p.kind === kind)?.fixedModelId;
+    }
+
+    protected syncCustomEndpointState(kind: ArschatProviderKind): void {
+        if (!this.isCustomEndpointProvider(kind)) {
+            return;
+        }
+        const url = this.switchService.getCustomEndpointUrl(kind);
+        const model = this.switchService.getCustomEndpointModel(kind);
+        this.customEndpointUrls.set(kind, url);
+        if (model) {
+            this.configuredCustomModelsByProvider.set(kind, model);
+        }
+        if (this.provider === kind) {
+            this.customEndpointDraft = url;
+            this.customEndpointError = '';
+            if (model) {
+                this.model = model;
+            }
+        }
+    }
+
+    protected async refreshLiveCustomModels(kind: ArschatProviderKind): Promise<void> {
+        if (this.isDisposed) {
+            return;
+        }
+        if (!this.isCustomEndpointProvider(kind)) {
+            return;
+        }
+        this.syncCustomEndpointState(kind);
+        const url = this.switchService.getCustomEndpointUrl(kind);
+        const token = ++this.liveCustomModelRequestSeq;
+        this.liveCustomModelRequestTokens.set(kind, token);
+        this.liveCustomModelAbortControllers.get(kind)?.abort();
+        const controller = new AbortController();
+        this.liveCustomModelAbortControllers.set(kind, controller);
+        this.customModelLoadStates.set(kind, 'loading');
+        if (!this.isDisposed) {
+            this.update();
+        }
+        try {
+            const names = await this.switchService.fetchCustomEndpointModels(kind, { signal: controller.signal });
+            if (!this.isCurrentLiveCustomModelRequest(kind, token, url)) {
+                return;
+            }
+            this.liveCustomModelsByProvider.set(kind, names);
+            this.customModelLoadStates.set(kind, 'idle');
+            const configured = this.switchService.getCustomEndpointModel(kind);
+            if (configured) {
+                this.configuredCustomModelsByProvider.set(kind, configured);
+            }
+            const preferred = [this.model, configured].find(candidate => !!candidate && names.includes(candidate));
+            const nextModel = preferred ?? names[0] ?? configured;
+            if (nextModel) {
+                this.model = nextModel;
+                await this.switchService.setActive(kind, nextModel);
+            }
+        } catch (error: unknown) {
+            if (!this.isCurrentLiveCustomModelRequest(kind, token, url)) {
+                return;
+            }
+            this.customModelLoadStates.set(kind, 'error');
+            console.error(`[arschat-chat] failed to fetch models for ${kind}`, error);
+        } finally {
+            if (this.liveCustomModelAbortControllers.get(kind) === controller) {
+                this.liveCustomModelAbortControllers.delete(kind);
+            }
+            if (this.isCurrentLiveCustomModelRequest(kind, token, url)) {
+                this.update();
+            }
+        }
+    }
+
+    protected isCurrentLiveCustomModelRequest(kind: ArschatProviderKind, token: number, url: string): boolean {
+        return !this.isDisposed
+            && this.liveCustomModelRequestTokens.get(kind) === token
+            && this.provider === kind
+            && this.switchService.getCustomEndpointUrl(kind) === url;
+    }
+
+    protected abortLiveCustomModelRequests(exceptKind?: ArschatProviderKind): void {
+        for (const [kind, controller] of this.liveCustomModelAbortControllers) {
+            if (kind !== exceptKind) {
+                controller.abort();
+                this.liveCustomModelAbortControllers.delete(kind);
+                this.liveCustomModelRequestTokens.delete(kind);
+            }
         }
     }
 
@@ -262,7 +408,12 @@ export class ArschatChatWidget extends ReactWidget {
         const provider = PROVIDERS.find(p => p.kind === this.provider);
         const models = this.modelsByProvider.get(this.provider) ?? [];
         if (provider?.fixedModelId) {
-            return [provider.fixedModelId];
+            const live = this.liveCustomModelsByProvider.get(this.provider) ?? [];
+            if (live.length > 0) {
+                return live;
+            }
+            const configured = this.configuredCustomModelsByProvider.get(this.provider) || this.model;
+            return configured ? [configured] : [];
         }
         const prefix = this.provider === 'openai' ? 'openai/' : 'anthropic/';
         return models.map(m => (m.id.startsWith(prefix) ? m.id.substring(prefix.length) : m.id));
@@ -278,16 +429,94 @@ export class ArschatChatWidget extends ReactWidget {
 
     protected async onProviderChange(kind: ArschatProviderKind): Promise<void> {
         this.provider = kind;
+        this.abortLiveCustomModelRequests(kind);
         await this.refreshModels();
+        // A newer provider switch may have overtaken us during the await above;
+        // from here on this run must not touch state the newer switch now owns.
+        if (this.provider !== kind) {
+            return;
+        }
         this.model = '';
-        await this.ensureModelSelected();
+        if (this.isCustomEndpointProvider(kind)) {
+            this.syncCustomEndpointState(kind);
+            if (this.model) {
+                await this.switchService.setActive(kind, this.model);
+                if (this.provider !== kind) {
+                    return;
+                }
+            }
+            await this.refreshLiveCustomModels(kind);
+        } else {
+            await this.ensureModelSelected();
+        }
+        if (this.provider !== kind) {
+            return;
+        }
         this.update();
     }
 
     protected async onModelChange(model: string): Promise<void> {
+        if (!model) {
+            return;
+        }
         this.model = model;
         await this.switchService.setActive(this.provider, model);
         this.update();
+    }
+
+    protected onCustomEndpointDraftChange(value: string): void {
+        this.customEndpointDraft = value;
+        this.customEndpointError = '';
+        this.update();
+    }
+
+    protected async commitCustomEndpointUrl(): Promise<void> {
+        const kind = this.provider;
+        const draft = this.customEndpointDraft;
+        if (!this.isCustomEndpointProvider(kind)) {
+            return;
+        }
+        // Per-provider supersede token: a newer commit for the SAME provider makes
+        // this one stale (its UI effects are dropped), while commits for another
+        // provider stay fully independent (the token map keys by provider).
+        const token = (this.customEndpointCommitSeqs.get(kind) ?? 0) + 1;
+        this.customEndpointCommitSeqs.set(kind, token);
+        const isCurrent = (): boolean => token === this.customEndpointCommitSeqs.get(kind) && this.provider === kind;
+        // Serialize the preference writes per provider. The stale check alone can
+        // only drop UI effects - it cannot un-write a preference update that already
+        // started - so writes must run in start order (the newest write lands last,
+        // keeping the stored URL from being reverted by a slow older commit). A
+        // commit already superseded when its turn comes skips its write entirely.
+        const chain = (this.customEndpointCommitChains.get(kind) ?? Promise.resolve())
+            .then(async () => {
+                if (token !== this.customEndpointCommitSeqs.get(kind)) {
+                    return;
+                }
+                const normalized = await this.switchService.updateCustomEndpointUrl(kind, draft);
+                if (!isCurrent()) {
+                    return;
+                }
+                this.customEndpointUrls.set(kind, normalized);
+                this.customEndpointDraft = normalized;
+                this.customEndpointError = '';
+                await this.refreshLiveCustomModels(kind);
+            })
+            .catch((error: unknown) => {
+                if (!isCurrent()) {
+                    return;
+                }
+                this.customEndpointError = error instanceof Error ? error.message : String(error);
+                this.update();
+            });
+        this.customEndpointCommitChains.set(kind, chain);
+        await chain;
+    }
+
+    protected onCustomEndpointKeyDown(e: React.KeyboardEvent<HTMLInputElement>): void {
+        if (e.key === 'Enter' && !this.isImeActive(e)) {
+            e.preventDefault();
+            this.commitCustomEndpointUrl();
+        }
     }
 
     // ---------------------------------------------------------------- sessions
@@ -883,6 +1112,7 @@ export class ArschatChatWidget extends ReactWidget {
         if (this.sending || msg.streaming) {
             return;
         }
+        this.flushComposingUpdate();
         for (const m of this.messages) {
             m.editing = false;
         }
@@ -900,6 +1130,7 @@ export class ArschatChatWidget extends ReactWidget {
 
     /** Leave edit mode without mutating the message/model. */
     protected cancelEdit(msg: UiMessage): void {
+        this.flushComposingUpdate();
         msg.editing = false;
         this.editDraft = '';
         this.update();
@@ -907,6 +1138,7 @@ export class ArschatChatWidget extends ReactWidget {
 
     /** Save an edit, using the asymmetric user/assistant behavior required by ms-8. */
     protected async saveEdit(msg: UiMessage): Promise<void> {
+        this.flushComposingUpdate();
         const newText = this.editDraft;
         if (msg.author === 'user') {
             await this.saveUserEdit(msg, newText);
@@ -1139,6 +1371,34 @@ export class ArschatChatWidget extends ReactWidget {
         this.update();
     }
 
+    protected onInputCompositionStart(): void {
+        this.composing = true;
+    }
+
+    protected onInputCompositionEnd(e: React.CompositionEvent<HTMLTextAreaElement>): void {
+        this.flushComposingUpdate();
+        this.onInputChange(e.currentTarget.value);
+    }
+
+    protected onEditDraftChange(value: string): void {
+        this.editDraft = value;
+        this.update();
+    }
+
+    protected onEditCompositionEnd(e: React.CompositionEvent<HTMLTextAreaElement>): void {
+        this.flushComposingUpdate();
+        this.onEditDraftChange(e.currentTarget.value);
+    }
+
+    protected onCustomEndpointCompositionEnd(e: React.CompositionEvent<HTMLInputElement>): void {
+        this.flushComposingUpdate();
+        this.onCustomEndpointDraftChange(e.currentTarget.value);
+    }
+
+    protected isImeActive(e: React.KeyboardEvent): boolean {
+        return e.nativeEvent.isComposing || e.keyCode === 229 || this.composing;
+    }
+
     /** Accept a suggestion: set the input to `/trigger ` and dismiss the popup. */
     protected selectSuggestion(skill: Skill): void {
         this.inputValue = `${skill.trigger} `;
@@ -1155,6 +1415,7 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected onInputKeyDown(e: React.KeyboardEvent): void {
+        const imeActive = this.isImeActive(e);
         if (this.slashSuggestions.length > 0) {
             if (e.key === 'ArrowDown') {
                 e.preventDefault();
@@ -1168,7 +1429,7 @@ export class ArschatChatWidget extends ReactWidget {
                 this.update();
                 return;
             }
-            if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+            if (!imeActive && (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey))) {
                 e.preventDefault();
                 this.selectSuggestion(this.slashSuggestions[this.suggestionIndex]);
                 return;
@@ -1180,16 +1441,46 @@ export class ArschatChatWidget extends ReactWidget {
                 return;
             }
         }
-        if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.key === 'Enter' && !e.shiftKey && !imeActive) {
             e.preventDefault();
             this.send();
         }
+    }
+
+    protected renderModelOptions(modelNames: string[]): React.ReactNode {
+        if (this.isCustomEndpointProvider(this.provider)) {
+            const state = this.customModelLoadStates.get(this.provider);
+            if (state === 'loading') {
+                return <option value='' disabled>(取得中...)</option>;
+            }
+            if (state === 'error') {
+                return <option value='' disabled>(接続できません)</option>;
+            }
+        }
+        if (modelNames.length === 0) {
+            return <option value=''>(no models)</option>;
+        }
+        return modelNames.map(name => (
+            <option key={name} value={name}>{name}</option>
+        ));
+    }
+
+    protected currentModelSelectValue(modelNames: string[]): string {
+        if (this.isCustomEndpointProvider(this.provider)) {
+            const state = this.customModelLoadStates.get(this.provider);
+            if (state === 'loading' || state === 'error') {
+                return '';
+            }
+        }
+        return modelNames.includes(this.model) ? this.model : '';
     }
 
     // ---------------------------------------------------------------- render
 
     render(): React.ReactElement {
         const modelNames = this.currentModelNames();
+        const customModelState = this.customModelLoadStates.get(this.provider);
+        const modelSelectDisabled = customModelState === 'loading' || customModelState === 'error';
         return (
             <div
                 id='arschat-chat-root'
@@ -1236,16 +1527,37 @@ export class ArschatChatWidget extends ReactWidget {
                             id='arschat-model-select'
                             className='theia-select arschat-model-select'
                             title='Model'
-                            value={this.model}
+                            value={this.currentModelSelectValue(modelNames)}
+                            disabled={modelSelectDisabled}
                             onChange={e => this.onModelChange(e.target.value)}
                         >
-                            {modelNames.length === 0 && <option value=''>(no models)</option>}
-                            {modelNames.map(name => (
-                                <option key={name} value={name}>{name}</option>
-                            ))}
+                            {this.renderModelOptions(modelNames)}
                         </select>
                     </div>
                 </div>
+                {this.isCustomEndpointProvider(this.provider) && (
+                    <div className='arschat-custom-endpoint-row'>
+                        <label className='arschat-custom-endpoint-label' htmlFor='arschat-custom-endpoint-url'>接続先</label>
+                        <input
+                            id='arschat-custom-endpoint-url'
+                            className='theia-input arschat-custom-endpoint-url'
+                            type='text'
+                            value={this.customEndpointDraft}
+                            spellCheck={false}
+                            onChange={e => this.onCustomEndpointDraftChange(e.currentTarget.value)}
+                            onKeyDown={e => this.onCustomEndpointKeyDown(e)}
+                            onCompositionStart={() => this.onInputCompositionStart()}
+                            onCompositionEnd={e => this.onCustomEndpointCompositionEnd(e)}
+                            onBlur={() => {
+                                this.flushComposingUpdate();
+                                this.commitCustomEndpointUrl();
+                            }}
+                        />
+                        {this.customEndpointError && (
+                            <span className='arschat-custom-endpoint-error'>{this.customEndpointError}</span>
+                        )}
+                    </div>
+                )}
                 <div className='arschat-chat-messages'>
                     {this.messages.length === 0 && (
                         <div className='arschat-chat-message arschat-chat-message-assistant'>
@@ -1299,6 +1611,9 @@ export class ArschatChatWidget extends ReactWidget {
                         onChange={e => this.onInputChange(e.target.value)}
                         onPaste={e => this.handlePaste(e)}
                         onKeyDown={e => this.onInputKeyDown(e)}
+                        onCompositionStart={() => this.onInputCompositionStart()}
+                        onCompositionEnd={e => this.onInputCompositionEnd(e)}
+                        onBlur={() => this.flushComposingUpdate()}
                     />
                     {this.sending ? (
                         <button
@@ -1328,19 +1643,20 @@ export class ArschatChatWidget extends ReactWidget {
                     id={`arschat-message-edit-${msg.id}`}
                     className='theia-input arschat-message-edit-textarea'
                     value={this.editDraft}
-                    onChange={e => {
-                        this.editDraft = e.currentTarget.value;
-                        this.update();
-                    }}
+                    onChange={e => this.onEditDraftChange(e.currentTarget.value)}
                     onKeyDown={e => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
+                        const imeActive = this.isImeActive(e);
+                        if (e.key === 'Enter' && !e.shiftKey && !imeActive) {
                             e.preventDefault();
                             this.saveEdit(msg);
-                        } else if (e.key === 'Escape') {
+                        } else if (e.key === 'Escape' && !imeActive) {
                             e.preventDefault();
                             this.cancelEdit(msg);
                         }
                     }}
+                    onCompositionStart={() => this.onInputCompositionStart()}
+                    onCompositionEnd={e => this.onEditCompositionEnd(e)}
+                    onBlur={() => this.flushComposingUpdate()}
                 />
                 <div className='arschat-message-edit-actions'>
                     <button
