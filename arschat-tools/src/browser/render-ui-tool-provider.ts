@@ -1,5 +1,5 @@
 // *****************************************************************************
-// arschat_render_ui ToolProvider (MS13 Phase 1).
+// arschat_render_ui ToolProvider (MS13).
 // *****************************************************************************
 
 import { inject, injectable } from '@theia/core/shared/inversify';

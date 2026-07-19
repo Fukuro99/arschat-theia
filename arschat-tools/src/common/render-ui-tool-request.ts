@@ -1,5 +1,5 @@
 // *****************************************************************************
-// arschat_render_ui ToolRequest factory (MS13 Phase 1).
+// arschat_render_ui ToolRequest factory (MS13).
 //
 // The browser provider injects ArschatUiInteractionService as the backend. The
 // handler intentionally stays pending until the chat widget resolves the matching
@@ -8,16 +8,17 @@
 
 import type { CancellationToken } from '@theia/core/lib/common/cancellation';
 import type { ToolCallResult, ToolInvocationContext, ToolRequest } from '@theia/ai-core/lib/common/language-model';
-import { parseToolArgs, toolError } from './tool-args';
+import { isCancelledError, parseToolArgs, toolError } from './tool-args';
 import { ARSCHAT_TOOL_PROVIDER_NAME, RENDER_UI_TOOL_ID } from './tool-ids';
 
 export interface RenderUiToolBackend {
     awaitInteraction(toolCallId: string, cancellationToken?: CancellationToken): Promise<ToolCallResult>;
+    awaitLiveInteraction(uiId: string, toolCallId: string, cancellationToken?: CancellationToken): Promise<ToolCallResult>;
 }
 
 export interface RenderUiArgs {
     id: string;
-    mode?: 'default';
+    mode?: 'default' | 'live';
     title?: string;
     state?: Record<string, unknown>;
     root: unknown;
@@ -32,8 +33,8 @@ export function validateRenderUiArgs(args: Partial<RenderUiArgs>): { ok: true; v
     if (!args.id || typeof args.id !== 'string') {
         return { ok: false, error: 'arschat_render_ui requires a non-empty string "id".' };
     }
-    if (args.mode !== undefined && args.mode !== 'default') {
-        return { ok: false, error: 'arschat_render_ui Phase 1 only supports mode "default".' };
+    if (args.mode !== undefined && args.mode !== 'default' && args.mode !== 'live') {
+        return { ok: false, error: 'arschat_render_ui mode must be "default" or "live".' };
     }
     if (!isRecord(args.root)) {
         return { ok: false, error: 'arschat_render_ui requires an object "root" UI node.' };
@@ -52,7 +53,7 @@ export function validateRenderUiArgs(args: Partial<RenderUiArgs>): { ok: true; v
         ok: true,
         value: {
             id: args.id,
-            mode: 'default',
+            mode: args.mode ?? 'default',
             title: typeof args.title === 'string' ? args.title : undefined,
             state: args.state ?? {},
             root: args.root,
@@ -66,7 +67,7 @@ export function createRenderUiTool(backend: RenderUiToolBackend): ToolRequest {
         id: RENDER_UI_TOOL_ID,
         name: RENDER_UI_TOOL_ID,
         providerName: ARSCHAT_TOOL_PROVIDER_NAME,
-        description: 'Render a default-mode interactive UI form inside the ArsChat message. The tool returns only after the user submits or cancels the form.',
+        description: 'Render an interactive UI inside the ArsChat message. Default mode returns after submit/cancel. Live mode returns on each user action and continues through arschat_update_ui.',
         // Theia runs checkAutoAction before requestUserConfirmation(), so global CONFIRM cannot park the handler before awaitInteraction().
         checkAutoAction: () => ({ action: 'allow' }),
         parameters: {
@@ -78,8 +79,8 @@ export function createRenderUiTool(backend: RenderUiToolBackend): ToolRequest {
                 },
                 mode: {
                     type: 'string',
-                    enum: ['default'],
-                    description: 'Phase 1 supports only "default".'
+                    enum: ['default', 'live'],
+                    description: 'Use "default" for submit-once forms and "live" for action/update loops.'
                 },
                 title: {
                     type: 'string',
@@ -110,9 +111,12 @@ export function createRenderUiTool(backend: RenderUiToolBackend): ToolRequest {
                 return toolError('arschat_render_ui requires a tool invocation context with toolCallId.');
             }
             try {
+                if (validation.value.mode === 'live') {
+                    return await backend.awaitLiveInteraction(validation.value.id, toolCallId, ctx?.cancellationToken);
+                }
                 return await backend.awaitInteraction(toolCallId, ctx?.cancellationToken);
             } catch (e) {
-                if (ctx?.cancellationToken?.isCancellationRequested) {
+                if (isCancelledError(e)) {
                     return { cancelled: true };
                 }
                 return toolError(e instanceof Error ? e.message : String(e));

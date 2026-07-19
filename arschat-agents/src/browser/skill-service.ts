@@ -78,16 +78,19 @@ const SAMPLE_SKILLS: Array<{ id: string; name: string; description: string; trig
         name: 'Interactive UI',
         description: 'Enable chat-rendered forms and interactive UI components.',
         trigger: '/ui',
-        tools: ['arschat_render_ui'],
+        tools: ['arschat_render_ui', 'arschat_update_ui', 'arschat_render_html', 'arschat_render_interactive_html'],
         body: [
             '# Interactive UI skill',
             '',
-            'You may render a small interactive form in the chat by calling the `arschat_render_ui` tool.',
-            'Use this only when the user would benefit from entering structured data or choosing options.',
+            'You may render interactive UI inside the chat by calling these tools:',
+            '- `arschat_render_ui`: primitive UI. Use `mode: "default"` for a submit-once form or `mode: "live"` for repeated action/update loops.',
+            '- `arschat_update_ui`: apply a patch to a live primitive UI or interactive HTML UI. Object fields merge recursively, arrays replace, and `status: "finished"` ends the UI.',
+            '- `arschat_render_html`: display-only sandboxed HTML. It renders in an iframe with `sandbox="allow-scripts"` and returns immediately.',
+            '- `arschat_render_interactive_html`: sandboxed HTML that reports user actions with `postMessage({ type: "interactive-ui-action", uiId, action, data }, "*")`.',
             '',
-            'The tool accepts one UI block with `mode: "default"`, a `title`, an initial `state`, a `root` node, and `actions`.',
-            'Use bound inputs such as `bind: "form.name"` so the submitted state contains the user-entered values.',
-            'After the user submits the UI, the submitted data will be returned as the tool result.'
+            'For primitive UI, pass one UI block with `id`, `mode`, optional `title`, initial `state`, a `root` node, and optional `actions`.',
+            'Use bound inputs such as `bind: "form.name"` so submitted/default data and live action state contain user-entered values.',
+            'For live or interactive HTML, after each user action, respond by calling `arschat_update_ui` with the same `ui_id`; do not create a new UI unless the task really needs one.'
         ].join('\n')
     }
 ];

@@ -53,6 +53,8 @@ import { RunCommandToolProvider } from './run-command-tool-provider';
 import { WebSearchToolProvider } from './web-search-tool-provider';
 import { FetchPageToolProvider } from './fetch-page-tool-provider';
 import { RenderUiToolProvider } from './render-ui-tool-provider';
+import { UpdateUiToolProvider } from './update-ui-tool-provider';
+import { RenderHtmlToolProvider, RenderInteractiveHtmlToolProvider } from './render-html-tool-provider';
 import { ArschatUiInteractionService } from './arschat-ui-interaction-service';
 import { ARSCHAT_ALL_TOOL_IDS, ARSCHAT_UI_TOOL_IDS } from '../common/tool-ids';
 import { CommandRunnerService, commandRunnerServicePath } from '../common/command-runner-protocol';
@@ -129,6 +131,9 @@ export function bindArschatTools(bind: interfaces.Bind): void {
     bindToolProvider(WebSearchToolProvider, bind);
     bindToolProvider(FetchPageToolProvider, bind);
     bindToolProvider(RenderUiToolProvider, bind);
+    bindToolProvider(UpdateUiToolProvider, bind);
+    bindToolProvider(RenderHtmlToolProvider, bind);
+    bindToolProvider(RenderInteractiveHtmlToolProvider, bind);
 
     // Attach the resolved tools to the ArsChat agent on startup.
     bind(ArschatToolsRegistrationContribution).toSelf().inSingletonScope();

@@ -45,7 +45,14 @@ import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocatio
 import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
 import { generateUuid } from '@theia/core/lib/common/uuid';
 import { TerminalCommands } from '@theia/terminal/lib/browser/terminal-frontend-contribution';
-import { ARSCHAT_BASE_TOOL_IDS, ARSCHAT_UI_TOOL_IDS, RENDER_UI_TOOL_ID } from 'arschat-tools/lib/common/tool-ids';
+import { CancelledError } from 'arschat-tools/lib/common/tool-args';
+import {
+    ARSCHAT_BASE_TOOL_IDS,
+    ARSCHAT_UI_TOOL_IDS,
+    RENDER_HTML_TOOL_ID,
+    RENDER_INTERACTIVE_HTML_TOOL_ID,
+    RENDER_UI_TOOL_ID
+} from 'arschat-tools/lib/common/tool-ids';
 import { ArschatUiInteractionService } from 'arschat-tools/lib/browser/arschat-ui-interaction-service';
 import {
     ArschatProviderKind,
@@ -64,8 +71,10 @@ import { ArschatStatsStore } from './arschat-stats-store';
 import { computeMessageStats, hasDisplayableStats, ResponseTokenUsageLike } from './arschat-message-stats';
 import { computeResizeTarget, DEFAULT_IMAGE_MAX_LONG_EDGE, ResizeTarget, shouldResizeImageMimeType } from './arschat-image-resize';
 import { BlockRenderer } from './interactive-ui/UIRenderer';
-import { normalizeInteractiveUIBlock } from './interactive-ui/schema';
-import type { InteractiveUIBlock } from './interactive-ui/types';
+import { normalizeInteractiveUIBlock, normalizeSandboxHTMLBlock } from './interactive-ui/schema';
+import { mergePatch } from './interactive-ui/state-manager';
+import { SandboxRenderer } from './interactive-ui/SandboxRenderer';
+import type { InteractiveUIBlock, SandboxHTMLBlock } from './interactive-ui/types';
 
 interface PendingImage {
     /** base64 data (no data: prefix) */
@@ -99,6 +108,12 @@ interface ToolCallView {
     uiSubmitted?: boolean;
     /** Restored unfinished UI calls no longer have a live handler to receive form data. */
     uiExpired?: boolean;
+    /** Live primitive UI state after local edits and update_ui patches. */
+    uiLiveState?: Record<string, any>;
+    /** True after a live/html action is returned and before update_ui re-enables it. */
+    uiWaitingForPatch?: boolean;
+    /** Finished state for live/html sessions, independent from the render tool result. */
+    uiFinished?: boolean;
 }
 
 interface UiMessage {
@@ -132,6 +147,19 @@ interface UiMessage {
 /** How much of a tool result we show before the fold (chars). */
 const TOOL_RESULT_PREVIEW_CHARS = 2000;
 const CONTINUE_PROMPT = '続けてください';
+
+function updateKeyPathRecord(obj: Record<string, any>, keyPath: string, value: any): Record<string, any> {
+    const keys = keyPath.split('.');
+    const result = { ...obj };
+    let current: Record<string, any> = result;
+    for (let i = 0; i < keys.length - 1; i++) {
+        const key = keys[i];
+        current[key] = { ...(current[key] || {}) };
+        current = current[key];
+    }
+    current[keys[keys.length - 1]] = value;
+    return result;
+}
 
 interface MutableResponseContentLike {
     clearContent(): void;
@@ -228,6 +256,8 @@ export class ArschatChatWidget extends ReactWidget {
     protected suggestionIndex = 0;
     /** Skill-declared tool ids that stay enabled for this chat session after first activation. */
     protected readonly activeSkillToolIds = new Set<string>();
+    protected readonly sandboxIframes = new Map<string, HTMLIFrameElement>();
+    protected readonly pendingSandboxPatches = new Map<string, Record<string, unknown>[]>();
 
     protected readonly toDispose = new DisposableCollection();
 
@@ -274,6 +304,7 @@ export class ArschatChatWidget extends ReactWidget {
         this.toDispose.push(this.personaService.onDidChange(() => { this.refreshPersonas(); }));
         await this.skillService.ready();
         this.toDispose.push(this.skillService.onDidChange(() => this.update()));
+        this.toDispose.push(this.uiInteractionService.onDidApplyPatch(event => this.onUiPatch(event.uiId, event.patch)));
 
         this.update();
     }
@@ -599,6 +630,9 @@ export class ArschatChatWidget extends ReactWidget {
         this.activeSkillToolIds.clear();
         this.applyAgentToolGate();
         this.messages = [];
+        this.sandboxIframes.clear();
+        this.pendingSandboxPatches.clear();
+        this.uiInteractionService.clearLiveSessions();
         this.pendingImages = [];
         this.setInputValue('');
         this.uiService.notifySessionChanged(undefined);
@@ -646,6 +680,9 @@ export class ArschatChatWidget extends ReactWidget {
         this.sessionId = session.id;
         this.activeSkillToolIds.clear();
         this.messages = [];
+        this.sandboxIframes.clear();
+        this.pendingSandboxPatches.clear();
+        this.uiInteractionService.clearLiveSessions();
         this.pendingImages = [];
         // Durations are looked up synchronously in appendRestoredRequest; make sure
         // the store's cache is loaded first (M6 e-25).
@@ -900,7 +937,7 @@ export class ArschatChatWidget extends ReactWidget {
             this.chatService.cancelRequest(this.sessionId, this.inflightRequestId).catch(() => { /* noop */ });
         }
         if (this.sending) {
-            this.uiInteractionService.rejectAll(new Error('Chat request canceled'));
+            this.uiInteractionService.rejectAll(new CancelledError());
         }
         if (this.sending) {
             this.sendSeq++;
@@ -910,7 +947,7 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected async abort(): Promise<void> {
-        this.uiInteractionService.rejectAll(new Error('Chat request canceled'));
+        this.uiInteractionService.rejectAll(new CancelledError());
         if (this.sessionId && this.inflightRequestId) {
             await this.chatService.cancelRequest(this.sessionId, this.inflightRequestId).catch(() => { /* noop */ });
         }
@@ -2105,6 +2142,12 @@ export class ArschatChatWidget extends ReactWidget {
         if (view.content.name === RENDER_UI_TOOL_ID) {
             return this.renderUiToolCard(view);
         }
+        if (view.content.name === RENDER_HTML_TOOL_ID) {
+            return this.renderSandboxHtmlToolCard(view, false);
+        }
+        if (view.content.name === RENDER_INTERACTIVE_HTML_TOOL_ID) {
+            return this.renderSandboxHtmlToolCard(view, true);
+        }
         const { content, state } = view;
         const toolName = content.name ?? 'tool';
         const argsLabel = content.arguments && content.arguments.length > 0 ? content.arguments : '';
@@ -2176,19 +2219,37 @@ export class ArschatChatWidget extends ReactWidget {
         }
     }
 
+    protected parseSandboxHtmlBlock(view: ToolCallView, interactive: boolean): SandboxHTMLBlock | undefined {
+        const args = view.content.arguments;
+        if (!args || !args.trim()) {
+            return undefined;
+        }
+        try {
+            return normalizeSandboxHTMLBlock(JSON.parse(args), interactive);
+        } catch {
+            return undefined;
+        }
+    }
+
     protected renderUiToolCard(view: ToolCallView): React.ReactElement {
         const block = this.parseRenderUiBlock(view);
         const state = view.state;
         const isExpired = view.uiExpired || state === 'expired';
+        if (block?.mode === 'live' && view.uiLiveState === undefined) {
+            view.uiLiveState = block.state ?? {};
+        }
         const isPendingParse = !isExpired && !view.content.finished && !block;
+        const isLive = block?.mode === 'live';
         return (
             <div key={view.key} className={`arschat-tool-card arschat-tool-card-${state} arschat-ui-tool-card`}>
                 <div className='arschat-tool-card-head'>
-                    {state === 'running' && !view.uiSubmitted
+                    {state === 'running' && !view.uiSubmitted && !view.uiWaitingForPatch
                         ? <span className='arschat-tool-card-spinner' />
                         : <span className={`arschat-tool-card-status ${this.toolStatusMeta(state).cls}`}>{this.toolStatusMeta(state).icon}</span>}
                     <span className='arschat-tool-card-name'>{RENDER_UI_TOOL_ID}</span>
-                    <span className='arschat-tool-card-label'>{view.uiSubmitted ? 'Submitted' : this.toolStatusMeta(state).label}</span>
+                    <span className='arschat-tool-card-label'>
+                        {view.uiSubmitted ? 'Submitted' : view.uiWaitingForPatch ? 'Updating' : this.toolStatusMeta(state).label}
+                    </span>
                 </div>
                 {isPendingParse && (
                     <div className='arschat-tool-card-result'>Preparing UI...</div>
@@ -2206,8 +2267,13 @@ export class ArschatChatWidget extends ReactWidget {
                 {!isExpired && block && (
                     <BlockRenderer
                         block={block}
-                        disabled={view.uiSubmitted || state === 'done' || state === 'denied'}
+                        disabled={isLive
+                            ? !!view.uiFinished || !!view.uiWaitingForPatch || state === 'denied'
+                            : view.uiSubmitted || state === 'done' || state === 'denied'}
+                        liveState={isLive ? view.uiLiveState : undefined}
                         onSubmit={(_uiId, action, data) => this.onRenderUiSubmit(view, block.id, action, data)}
+                        onLiveAction={(_uiId, action, data, currentState) => this.onLiveUiAction(view, block.id, action, data, currentState)}
+                        onLocalStateChange={(_uiId, keyPath, value) => this.onLiveUiLocalStateChange(view, block.id, keyPath, value)}
                     />
                 )}
             </div>
@@ -2222,6 +2288,137 @@ export class ArschatChatWidget extends ReactWidget {
         view.uiSubmitted = true;
         this.uiInteractionService.resolve(toolCallId, { uiId, action, data });
         this.update();
+    }
+
+    protected onLiveUiAction(
+        view: ToolCallView,
+        uiId: string,
+        action: string,
+        data: Record<string, any>,
+        currentState: Record<string, any>
+    ): void {
+        if (view.uiExpired || view.uiFinished || view.uiWaitingForPatch) {
+            return;
+        }
+        const accepted = this.uiInteractionService.resolveLiveAction(uiId, action, { ...data, state: currentState });
+        if (accepted) {
+            view.uiWaitingForPatch = !this.uiInteractionService.isLiveFinished(uiId);
+            this.update();
+        }
+    }
+
+    protected onLiveUiLocalStateChange(view: ToolCallView, uiId: string, keyPath: string, value: any): void {
+        if (view.uiExpired || view.uiFinished || view.uiWaitingForPatch) {
+            return;
+        }
+        view.uiLiveState = updateKeyPathRecord(view.uiLiveState ?? {}, keyPath, value);
+        this.update();
+    }
+
+    protected renderSandboxHtmlToolCard(view: ToolCallView, interactive: boolean): React.ReactElement {
+        const block = this.parseSandboxHtmlBlock(view, interactive);
+        const state = view.state;
+        const isExpired = view.uiExpired || state === 'expired';
+        const isPendingParse = !isExpired && !view.content.finished && !block;
+        const toolId = interactive ? RENDER_INTERACTIVE_HTML_TOOL_ID : RENDER_HTML_TOOL_ID;
+        return (
+            <div key={view.key} className={`arschat-tool-card arschat-tool-card-${state} arschat-ui-tool-card`}>
+                <div className='arschat-tool-card-head'>
+                    {state === 'running' && !view.uiWaitingForPatch
+                        ? <span className='arschat-tool-card-spinner' />
+                        : <span className={`arschat-tool-card-status ${this.toolStatusMeta(state).cls}`}>{this.toolStatusMeta(state).icon}</span>}
+                    <span className='arschat-tool-card-name'>{toolId}</span>
+                    <span className='arschat-tool-card-label'>{view.uiWaitingForPatch ? 'Updating' : this.toolStatusMeta(state).label}</span>
+                </div>
+                {isPendingParse && (
+                    <div className='arschat-tool-card-result'>Preparing HTML...</div>
+                )}
+                {isExpired && (
+                    <div className='arschat-tool-card-result arschat-tool-card-result-denied'>
+                        縺薙・繝輔か繝ｼ繝縺ｯ譛牙柑譛滄剞縺悟・繧後∪縺励◆縲・                    </div>
+                )}
+                {!isExpired && !isPendingParse && !block && (
+                    <div className='arschat-tool-card-result arschat-tool-card-result-denied'>
+                        Invalid sandbox HTML block.
+                    </div>
+                )}
+                {!isExpired && block && (
+                    <SandboxRenderer
+                        block={block}
+                        isFinished={!!view.uiFinished || (interactive ? state === 'denied' : false)}
+                        onAction={(uiId, action, data) => this.onSandboxHtmlAction(view, uiId, action, data)}
+                        onIframeReady={(uiId, iframe) => this.onSandboxIframeReady(uiId, iframe)}
+                    />
+                )}
+            </div>
+        );
+    }
+
+    protected onSandboxHtmlAction(view: ToolCallView, uiId: string, action: string, data: Record<string, any>): void {
+        if (view.uiExpired || view.uiFinished || view.uiWaitingForPatch) {
+            return;
+        }
+        const accepted = this.uiInteractionService.resolveLiveAction(uiId, action, data);
+        if (accepted) {
+            view.uiWaitingForPatch = !this.uiInteractionService.isLiveFinished(uiId);
+            this.update();
+        }
+    }
+
+    protected onUiPatch(uiId: string, patch: Record<string, unknown>): void {
+        let changed = false;
+        for (const msg of this.messages) {
+            for (const view of msg.toolCalls ?? []) {
+                if (view.content.name === RENDER_UI_TOOL_ID) {
+                    const block = this.parseRenderUiBlock(view);
+                    if (block?.mode === 'live' && block.id === uiId) {
+                        view.uiLiveState = mergePatch(view.uiLiveState ?? block.state ?? {}, patch as Record<string, any>);
+                        view.uiWaitingForPatch = false;
+                        if (patch.status === 'finished') {
+                            view.uiFinished = true;
+                        }
+                        changed = true;
+                    }
+                } else if (view.content.name === RENDER_INTERACTIVE_HTML_TOOL_ID) {
+                    const block = this.parseSandboxHtmlBlock(view, true);
+                    if (block?.id === uiId) {
+                        this.dispatchSandboxPatch(uiId, patch);
+                        view.uiWaitingForPatch = false;
+                        if (patch.status === 'finished') {
+                            view.uiFinished = true;
+                        }
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (changed) {
+            this.update();
+        }
+    }
+
+    protected onSandboxIframeReady(uiId: string, iframe: HTMLIFrameElement | null): void {
+        if (!iframe) {
+            this.sandboxIframes.delete(uiId);
+            return;
+        }
+        this.sandboxIframes.set(uiId, iframe);
+        const patches = this.pendingSandboxPatches.get(uiId) ?? [];
+        this.pendingSandboxPatches.delete(uiId);
+        for (const patch of patches) {
+            this.dispatchSandboxPatch(uiId, patch);
+        }
+    }
+
+    protected dispatchSandboxPatch(uiId: string, patch: Record<string, unknown>): void {
+        const iframe = this.sandboxIframes.get(uiId);
+        if (!iframe?.contentWindow) {
+            const patches = this.pendingSandboxPatches.get(uiId) ?? [];
+            patches.push(patch);
+            this.pendingSandboxPatches.set(uiId, patches);
+            return;
+        }
+        iframe.contentWindow.postMessage({ type: 'interactive-ui-update', uiId, patch }, '*');
     }
 
     protected toolStatusMeta(state: ToolCallView['state']): { icon: string; label: string; cls: string } {

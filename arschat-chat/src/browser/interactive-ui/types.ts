@@ -31,6 +31,15 @@ export interface UIUpdatePatch {
   patch: Record<string, any>;
 }
 
+export interface SandboxHTMLBlock {
+  id: string;
+  title?: string;
+  html: string;
+  width?: string;
+  height?: string;
+  interactive?: boolean;
+}
+
 export interface PrimitiveProps {
   props: Record<string, any>;
   value?: any;

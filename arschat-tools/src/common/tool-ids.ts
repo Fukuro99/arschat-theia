@@ -24,10 +24,12 @@ export const RUN_COMMAND_TOOL_ID = 'run_command';
 export const WEB_SEARCH_TOOL_ID = 'web_search';
 export const FETCH_PAGE_TOOL_ID = 'fetch_page';
 
-// MS13 Phase 1: primitive interactive UI rendering in default mode. This tool is
-// registered in the global ToolInvocationRegistry but only attached to the
-// ArsChat agent when a skill frontmatter declares it (the built-in /ui skill).
+// MS13: interactive UI tools are registered globally but only attached to the
+// ArsChat agent when a skill frontmatter declares them (the built-in /ui skill).
 export const RENDER_UI_TOOL_ID = 'arschat_render_ui';
+export const UPDATE_UI_TOOL_ID = 'arschat_update_ui';
+export const RENDER_HTML_TOOL_ID = 'arschat_render_html';
+export const RENDER_INTERACTIVE_HTML_TOOL_ID = 'arschat_render_interactive_html';
 
 /** Every ArsChat AI tool id the frontend module resolves and attaches to the agent. */
 export const ARSCHAT_ALL_TOOL_IDS = [
@@ -41,4 +43,9 @@ export const ARSCHAT_ALL_TOOL_IDS = [
 export const ARSCHAT_BASE_TOOL_IDS = [...ARSCHAT_ALL_TOOL_IDS];
 
 /** Interactive UI tools exposed only by skill frontmatter. */
-export const ARSCHAT_UI_TOOL_IDS = [RENDER_UI_TOOL_ID];
+export const ARSCHAT_UI_TOOL_IDS = [
+    RENDER_UI_TOOL_ID,
+    UPDATE_UI_TOOL_ID,
+    RENDER_HTML_TOOL_ID,
+    RENDER_INTERACTIVE_HTML_TOOL_ID
+];

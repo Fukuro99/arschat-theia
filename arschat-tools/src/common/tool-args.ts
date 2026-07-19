@@ -21,3 +21,22 @@ export function parseToolArgs<T extends object = Record<string, unknown>>(argStr
 export function toolError(message: string): string {
     return `ERROR: ${message}`;
 }
+
+export class CancelledError extends Error {
+    static readonly messageText = 'Chat request canceled';
+
+    constructor(message = CancelledError.messageText) {
+        super(message);
+        this.name = 'CancelledError';
+    }
+}
+
+export function isCancelledError(reason: unknown): boolean {
+    if (reason instanceof CancelledError) {
+        return true;
+    }
+    if (reason instanceof Error) {
+        return reason.message === CancelledError.messageText || reason.name === 'CancelledError';
+    }
+    return reason === CancelledError.messageText;
+}

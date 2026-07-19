@@ -1,5 +1,5 @@
 import { primitiveRegistry } from './primitives';
-import type { InteractiveUIBlock, UIAction, UINode } from './types';
+import type { InteractiveUIBlock, SandboxHTMLBlock, UIAction, UINode } from './types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -38,7 +38,7 @@ export function normalizeInteractiveUIBlock(value: unknown): InteractiveUIBlock 
   if (!isRecord(value) || typeof value.id !== 'string' || !value.id.trim()) {
     return undefined;
   }
-  if (value.mode !== undefined && value.mode !== 'default') {
+  if (value.mode !== undefined && value.mode !== 'default' && value.mode !== 'live') {
     return undefined;
   }
   const root = normalizeNode(value.root);
@@ -47,13 +47,30 @@ export function normalizeInteractiveUIBlock(value: unknown): InteractiveUIBlock 
   }
   return {
     id: value.id,
-    mode: 'default',
+    mode: value.mode === 'live' ? 'live' : 'default',
     title: typeof value.title === 'string' ? value.title : undefined,
     state: isRecord(value.state) ? value.state : {},
     root,
     actions: Array.isArray(value.actions)
       ? value.actions.map(normalizeAction).filter((action): action is UIAction => !!action)
       : undefined,
+  };
+}
+
+export function normalizeSandboxHTMLBlock(value: unknown, interactive = false): SandboxHTMLBlock | undefined {
+  if (!isRecord(value) || typeof value.id !== 'string' || !value.id.trim()) {
+    return undefined;
+  }
+  if (typeof value.html !== 'string' || !value.html.trim()) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    title: typeof value.title === 'string' ? value.title : undefined,
+    html: value.html,
+    width: typeof value.width === 'string' ? value.width : undefined,
+    height: typeof value.height === 'string' ? value.height : undefined,
+    interactive,
   };
 }
 

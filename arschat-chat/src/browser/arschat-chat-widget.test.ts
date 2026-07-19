@@ -671,6 +671,36 @@ describe('ArschatChatWidget', () => {
         }
     });
 
+    it('clears live UI session state when starting a new session', async () => {
+        const pending = uiInteractionService.awaitLiveInteraction('live-1', 'tc-live');
+        uiInteractionService.resolveLiveAction('live-1', 'start', {});
+        await pending;
+        expect(uiInteractionService.hasLiveSession('live-1')).toBe(true);
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            asAny(widget).startNewSession();
+            expect(uiInteractionService.hasLiveSession('live-1')).toBe(false);
+        } finally {
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('clears live UI session state when loading another session', async () => {
+        const pending = uiInteractionService.awaitLiveInteraction('live-1', 'tc-live');
+        uiInteractionService.resolveLiveAction('live-1', 'start', {});
+        await pending;
+        restoredRequests = [];
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            await asAny(widget).loadSession('next-session');
+            expect(uiInteractionService.hasLiveSession('live-1')).toBe(false);
+        } finally {
+            updateSpy.mockRestore();
+        }
+    });
+
     it('restores sticky UI tools when loading a session that activated /ui', async () => {
         for (const id of [...ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID]) {
             registerTool(id);
