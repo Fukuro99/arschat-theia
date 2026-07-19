@@ -27,6 +27,7 @@ import { ArschatM3AutotestContribution } from './arschat-m3-autotest-contributio
 import { ArschatM6AutotestContribution } from './arschat-m6-autotest-contribution';
 import { ArschatM7AutotestContribution } from './arschat-m7-autotest-contribution';
 import { ArschatM11AutotestContribution } from './arschat-m11-autotest-contribution';
+import { ArschatM13AutotestContribution } from './arschat-m13-autotest-contribution';
 import { bindViewContribution, FrontendApplicationContribution, WidgetFactory } from '@theia/core/lib/browser';
 import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
 
@@ -85,4 +86,9 @@ export default new ContainerModule(bind => {
     // header terminal toggle button expands and collapses Theia's bottom panel.
     bind(ArschatM11AutotestContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatM11AutotestContribution);
+
+    // M13 autotest (no-op unless ARSCHAT_M13_AUTOTEST=1): drives /ui tool gating,
+    // default/live UI interactions, render_html sandbox DOM, and no-skill hiding.
+    bind(ArschatM13AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM13AutotestContribution);
 });
