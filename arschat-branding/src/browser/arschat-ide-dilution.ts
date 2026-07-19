@@ -47,6 +47,10 @@
 //    context-menu contributions) disappear too - the view is fully hidden.
 //    Our own chat/history/persona views live in arschat-chat / arschat-agents
 //    and are NOT filtered, so they remain in the activity bar.
+//    The vsx-registry Extensions view is deliberately NOT filtered either
+//    (ms-12): it is the user-facing entry point for searching/installing
+//    Open VSX extensions, and the stock view is kept as-is instead of a
+//    custom UI. Its activity-bar icon and View-menu toggle stay visible.
 //
 // Note: `notebook` does not contribute a left activity-bar icon (it is
 // editor-hosted; it has no `initializeLayout`->`openView`), so there is nothing
@@ -73,7 +77,6 @@ import { DebugFrontendApplicationContribution } from '@theia/debug/lib/browser/d
 import { TestViewContribution } from '@theia/test/lib/browser/view/test-view-contribution';
 import { SearchInWorkspaceFrontendContribution } from '@theia/search-in-workspace/lib/browser/search-in-workspace-frontend-contribution';
 import { FileNavigatorContribution } from '@theia/navigator/lib/browser/navigator-contribution';
-import { VSXExtensionsContribution } from '@theia/vsx-registry/lib/browser/vsx-extensions-contribution';
 import { OutlineViewContribution } from '@theia/outline-view/lib/browser/outline-view-contribution';
 import { AIChatContribution } from '@theia/ai-chat-ui/lib/browser/ai-chat-ui-contribution';
 
@@ -97,7 +100,6 @@ const MENU_FILTERED: Array<new (...args: any[]) => object> = [
     TestViewContribution,
     SearchInWorkspaceFrontendContribution,
     FileNavigatorContribution,
-    VSXExtensionsContribution,
     OutlineViewContribution,
     // Stock @theia/ai-chat-ui chat view: ArsChat's own chat widget is the primary
     // UI, so the redundant stock AI chat view is hidden to avoid a "double chat"
@@ -120,7 +122,6 @@ const ACTIVITY_BAR_FILTERED: Array<new (...args: any[]) => object> = [
     TestViewContribution,                  // Test
     SearchInWorkspaceFrontendContribution, // Search
     FileNavigatorContribution,             // Explorer
-    VSXExtensionsContribution,             // Extensions
     OutlineViewContribution,               // Outline
     AIChatContribution                     // stock AI chat view (double-chat avoidance)
 ];
@@ -153,7 +154,7 @@ export class ArschatMenuFilterContribution implements FilterContribution {
         ]);
 
         // 2. Activity bar: remove SCM / Debug / Test / Search / Explorer /
-        //    Extensions / Outline icons by suppressing their initializeLayout().
+        //    Outline icons by suppressing their initializeLayout().
         registry.addFilters([FrontendApplicationContribution], [
             contrib => {
                 const keep = !isInstanceOfAny(contrib, ACTIVITY_BAR_FILTERED);

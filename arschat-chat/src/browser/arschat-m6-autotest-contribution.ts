@@ -13,7 +13,7 @@
 //   1. 再希釈 (menu bar): the top-level menu bar carries File/Edit/View/Help and
 //      NOT Run/Selection/Go/Terminal (queried from MenuModelRegistry).
 //   2. 再希釈 (activity bar): no IDE side view (SCM/debug/test/search/explorer/
-//      extensions/outline) and no stock @theia/ai-chat-ui chat view are docked in
+//      outline) and no stock @theia/ai-chat-ui chat view are docked in
 //      the left/right side panels (queried from ApplicationShell). This also
 //      detects a stale persisted layout that restored an IDE view the filter was
 //      meant to suppress (the e-21 "永続レイアウトの罠").
@@ -26,6 +26,7 @@
 //      (and that クリック → navigator.clipboard.writeText fires) and its stats bar
 //      (the mock emits a usage part, so the bar shows real usage numbers).
 //
+// MS12 allows the vsx-registry Extensions view as ArsChat's Open VSX entry.
 // All logs use the [M6] prefix.
 // *****************************************************************************
 
@@ -188,7 +189,7 @@ export class ArschatM6AutotestContribution implements FrontendApplicationContrib
         // ArsChat's own views are id-prefixed `arschat-` and are excluded.
         const idePatterns = [
             'scm', 'debug', 'test', 'search-in-workspace', 'navigator', 'explorer',
-            'files', 'vsx', 'extension', 'outline', 'chat-view-widget'
+            'files', 'outline', 'chat-view-widget'
         ];
         const strays = sideIds.filter(id =>
             !id.startsWith('arschat') && idePatterns.some(p => id.toLowerCase().includes(p)));

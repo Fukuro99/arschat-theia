@@ -1178,3 +1178,26 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 
 - ターミナルでの実コマンド実行 (`dir` / `echo`) と出力の目視、日本語の表示・入力 (autotest は開閉までで、シェルへの打鍵は行っていない)。
 - 既定シェルが cmd / PowerShell のどちらで開くか (Theia 既定に任せている)。
+
+## Phase 1 MS12 実装メモ (e-67〜e-71: Open VSX Extensions ビューの復活)
+
+作業日: 2026-07-19 / 対象: VS Code 拡張を検索してワンクリックで入れられる (Open VSX マーケットプレイス統合)。分業: 調査 = Fable セッション内で裏取り (MS12_BRIEF.md に集約)、実装・レビュー = Codex CLI (別セッション)、指揮・検証 = Fable。
+
+- **前提の発見**: `@theia/vsx-registry` は導入済みで PoC-3 が Extensions ビューの動作まで確認済み。ms-12 の実体は「新機能」ではなく「希釈フィルタで隠していた正規ビューへの入口の復活」。設計判断 (ユーザー決定): 純正ビューをアクティビティバーに復活させる方式。ヘッダーボタン方式 (ms-11 型) と独自 UI は却下 (判断軌跡は SPEC 参照)。
+- **e-67 希釈フィルタ除外**: `arschat-ide-dilution.ts` の `MENU_FILTERED` / `ACTIVITY_BAR_FILTERED` から `VSXExtensionsContribution` を除外。View メニューの開閉項目とアクティビティバーのアイコンが復活。他ビュー (SCM/Debug/Search/Explorer/Outline/純正チャット) の希釈は不変。
+- **e-68 stale 掃除の調整 + 永続レイアウトの罠 (逆向き)**: `arschat-stale-ide-view-cleanup.ts` の削除対象から `'vsx'` / `'extension'` を除去。さらに e-21 の罠の逆向きが今回の核心: `initializeLayout()` はフレッシュレイアウトの初回しか走らないため、**フィルタを外すだけでは既存プロファイルにアイコンは現れない** (これまでのビルドの永続レイアウトに vsx は含まれず、むしろ掃除が消し続けてきた)。→ 新規 `arschat-extensions-view-restorer.ts`: `onDidInitializeLayout` で左パネルに `vsx-extensions-view-container` が無ければ `getOrCreateWidget` + `addWidget({area:'left'})` で補完 (activate/reveal はしない、チャットが主役のまま)。冪等 (あれば no-op)。
+- **M6 autotest の期待値更新**: `idePatterns` から `'vsx'` / `'extension'` を除去 (Extensions は正規ビューになったため。残さないと M6 が恒常 FAIL する)。
+- **e-70 ARSCHAT_M12_AUTOTEST**: `arschat-branding/src/browser/arschat-m12-autotest-contribution.ts` (M11 型踏襲)。シナリオ: (1) icon-docked (2) open-view (toggle 二重発火ガード付き) (3) live-search (Open VSX 実通信、query='theme') (4) dilution-regression (vsx を許可した上で M6 相当の希釈回帰)。
+- **Codex レビュー (1 巡 + nit 修正)**: blocker / should-fix なし。nit 1 件 (M6 autotest ヘッダーコメントの旧期待値) → 修正済み。レビュー側で Theia 実装も裏取り (`initializeLayout()` は `openView({activate:false})`、`vsxExtensions.toggle` は `AbstractViewContribution.toggleView()` 経由)。
+
+確認結果:
+
+- `npm --prefix arschat-branding run build` / `npm --prefix arschat-chat run build`: 成功 (tsc エラー 0)。
+- `npm --prefix arschat-chat test`: 5 suites / 99 tests all green。
+- 実機 autotest (`ARSCHAT_M12_AUTOTEST=1`、2 回起動): **3 PASS / 1 FAIL** ×2。PASS = icon-docked (復元 contribution の発火ログ確認) / open-view (~140ms) / live-search (17 件ヒット、dracula-theme 等)。FAIL = dilution-regression の stray `scm-view-container` のみ = **ms-11 記録済みの GitLens 既知問題** (プラグインビューは希釈の仕組みに乗らない経路、別タスク切り出し済み)。ms-12 起因の退行ではない。
+- 2 回目起動でも icon-docked PASS。強制終了 (taskkill) だとレイアウト未保存で復元 contribution が毎回補完する挙動 — どの経路でもアイコンが常に出る設計意図通り。
+
+### 実機確認できなかった項目 (ユーザー確認待ち)
+
+- Install ボタン 1 クリックでの拡張設置 → その場で有効化 → 再起動後も有効のまま、の目視確認 (autotest は検索まで。設置は実プラグイン配置を伴うため手動確認とした)。
+- 設置済み拡張のアンインストール・更新の純正 UI 操作。
