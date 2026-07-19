@@ -1201,3 +1201,27 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 
 - Install ボタン 1 クリックでの拡張設置 → その場で有効化 → 再起動後も有効のまま、の目視確認 (autotest は検索まで。設置は実プラグイン配置を伴うため手動確認とした)。
 - 設置済み拡張のアンインストール・更新の純正 UI 操作。
+
+## Phase 1 MS15 実装メモ (e-74〜e-79: Explorer / Search / Outline の IDE 希釈解除)
+
+作業日: 2026-07-19 / 対象: ファイルブラウザ・全文検索・アウトラインが使える。分業: 調査 = Sonnet (MS15_BRIEF.md)、実装・レビュー = Codex CLI (別セッション)、指揮・検証 = Fable。
+
+- **設計判断 (ユーザー決定)**: 3 ビュー一括復活 (Explorer のみの最小案は分割オーバーヘッドの方が大きいと判断)。フォルダ動線は Theia 標準に乗る (File メニューの「フォルダーを開く」+ recentworkspace.json による前回フォルダ自動復元 — どちらも希釈対象外で生きていることを調査で裏取り済み、ArsChat 側の新規実装ゼロ)。
+- **e-74 希釈フィルタ除外**: MENU_FILTERED / ACTIVITY_BAR_FILTERED から FileNavigatorContribution・SearchInWorkspaceFrontendContribution・OutlineViewContribution を除外。SCM/Debug/Test/純正チャットの希釈は維持。
+- **e-75 期待値 3 箇所の同期除去**: stale 掃除 / M6 autotest / M12 autotest の期待値配列から 'navigator'・'explorer'・'files'・'search-in-workspace'・'outline' を除去、残りは 'scm'・'debug'・'test'・'chat-view-widget' の 4 つに収斂。'navigator' は現行 Theia の実 id (files / explorer-view-container) に一致しない死んだパターンだったことも調査で判明、この機会に整理。
+- **e-76 復元の汎用化**: arschat-extensions-view-restorer.ts を ArschatSideViewRestorer に一般化 — (ビュー id, 配置エリア) の一覧 RESTORED_SIDE_VIEWS で explorer-view-container (左)・search-view-container (左)・outline-view (右)・vsx-extensions-view-container (左) を冪等補完。activate はしない。**Codex の裏取りの成果**: Search の activity bar 実体は子 widget 'search-in-workspace' ではなく view container 'search-view-container' であり、ブリーフの当初想定を実装時に修正した。
+- **e-78 ARSCHAT_M15_AUTOTEST**: (1) stock-views-docked (左 2 + 右 1) (2) dilution-regression (メニュー + サイドパネル。GitLens 既知 stray は knownGitLensStrays として判定から分離 — ms-11 以来の恒常 FAIL がこれで解消) (3) explorer-toggle。
+- **Codex レビュー (1 巡)**: blocker / should-fix / nit すべてなし。「問題なし」判定。SEARCH_VIEW_CONTAINER_ID の同一性・Outline 右エリア・期待値 4 箇所の同期を node_modules で裏取り済み。
+
+確認結果:
+
+- `npm --prefix arschat-branding run build` / `npm --prefix arschat-chat run build`: 成功 (tsc エラー 0)。
+- `npm --prefix arschat-chat test`: 5 suites / 99 tests all green。
+- 実機 autotest (`ARSCHAT_M15_AUTOTEST=1`、2 回起動): **3 PASS / 0 FAIL** ×2。復元 contribution が 4 ビューすべてを補完するログを確認。強制終了 (taskkill) のためレイアウト未保存 → 毎回復元経路に入る挙動は ms-12 と同じ設計意図通り。
+
+### 実機確認できなかった項目 (ユーザー確認待ち)
+
+- File メニュー「フォルダーを開く」→ Explorer ツリー表示 → ファイルダブルクリックで編集・保存、の目視確認。
+- Search でのキーワード検索と結果クリックでのジャンプ。
+- コードファイルを開いた時の Outline のシンボル表示。
+- 通常終了 (ウィンドウを閉じる) 後の再起動で、前回フォルダとレイアウトが復元されること。

@@ -32,16 +32,15 @@ import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { SCM_VIEW_CONTAINER_ID } from '@theia/scm/lib/browser/scm-contribution';
 
 /**
- * Substrings that only a diluted IDE side view (or the stock @theia/ai-chat-ui
- * chat view, `chat-view-widget`) carries in its widget id. Mirrors the id set the
- * M6 autotest checks for. ArsChat's own views are `arschat-`prefixed and excluded.
- * `vsx` / `extension` are NOT listed (ms-12): the vsx-registry Extensions view is
- * a legitimate, user-facing view now, so a persisted layout that restores it must
- * be left intact.
+ * Substrings that only a still-diluted IDE side view (or the stock
+ * @theia/ai-chat-ui chat view, `chat-view-widget`) carries in its widget id.
+ * Mirrors the id set the M6/M12/M15 autotests check for. ArsChat's own views are
+ * `arschat-`prefixed and excluded. `vsx`/`extension` (ms-12) and
+ * Explorer/Search/Outline (ms-15) are legitimate, user-facing views now, so a
+ * persisted layout that restores them must be left intact.
  */
 export const STALE_IDE_VIEW_ID_PATTERNS: readonly string[] = [
-    'scm', 'debug', 'test', 'search-in-workspace', 'navigator', 'explorer',
-    'files', 'outline', 'chat-view-widget'
+    'scm', 'debug', 'test', 'chat-view-widget'
 ];
 
 /** True when `id` denotes a diluted IDE/stock-chat view (and not an ArsChat view). */

@@ -12,8 +12,8 @@
 //
 //   1. 再希釈 (menu bar): the top-level menu bar carries File/Edit/View/Help and
 //      NOT Run/Selection/Go/Terminal (queried from MenuModelRegistry).
-//   2. 再希釈 (activity bar): no IDE side view (SCM/debug/test/search/explorer/
-//      outline) and no stock @theia/ai-chat-ui chat view are docked in
+//   2. 再希釈 (activity bar): no still-diluted IDE side view (SCM/debug/test)
+//      and no stock @theia/ai-chat-ui chat view are docked in
 //      the left/right side panels (queried from ApplicationShell). This also
 //      detects a stale persisted layout that restored an IDE view the filter was
 //      meant to suppress (the e-21 "永続レイアウトの罠").
@@ -27,6 +27,7 @@
 //      (the mock emits a usage part, so the bar shows real usage numbers).
 //
 // MS12 allows the vsx-registry Extensions view as ArsChat's Open VSX entry.
+// MS15 allows Explorer/Search/Outline as stock ArsChat navigation surfaces.
 // All logs use the [M6] prefix.
 // *****************************************************************************
 
@@ -185,11 +186,11 @@ export class ArschatM6AutotestContribution implements FrontendApplicationContrib
             ...this.shell.getWidgets('left').map(w => w.id),
             ...this.shell.getWidgets('right').map(w => w.id)
         ];
-        // Substrings that only an IDE side view (or the stock AI chat view) would carry.
-        // ArsChat's own views are id-prefixed `arschat-` and are excluded.
+        // Substrings that only a still-diluted IDE side view (or the stock AI chat
+        // view) would carry. ArsChat's own views are id-prefixed `arschat-` and are
+        // excluded. Explorer/Search/Outline are intentionally allowed by MS15.
         const idePatterns = [
-            'scm', 'debug', 'test', 'search-in-workspace', 'navigator', 'explorer',
-            'files', 'outline', 'chat-view-widget'
+            'scm', 'debug', 'test', 'chat-view-widget'
         ];
         const strays = sideIds.filter(id =>
             !id.startsWith('arschat') && idePatterns.some(p => id.toLowerCase().includes(p)));

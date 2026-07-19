@@ -46,11 +46,11 @@
 //    above, so their now-pointless "Toggle X" entries under the View menu (and
 //    context-menu contributions) disappear too - the view is fully hidden.
 //    Our own chat/history/persona views live in arschat-chat / arschat-agents
-//    and are NOT filtered, so they remain in the activity bar.
-//    The vsx-registry Extensions view is deliberately NOT filtered either
-//    (ms-12): it is the user-facing entry point for searching/installing
-//    Open VSX extensions, and the stock view is kept as-is instead of a
-//    custom UI. Its activity-bar icon and View-menu toggle stay visible.
+//    and are NOT filtered, so they remain in the activity bar. Explorer,
+//    Search, Outline, and the vsx-registry Extensions view are deliberately
+//    NOT filtered (ms-15/ms-12): these are now user-facing ArsChat surfaces,
+//    and the stock views are kept as-is instead of custom UI. Their activity-bar
+//    icons and View-menu toggles stay visible.
 //
 // Note: `notebook` does not contribute a left activity-bar icon (it is
 // editor-hosted; it has no `initializeLayout`->`openView`), so there is nothing
@@ -75,9 +75,6 @@ import { TerminalFrontendContribution } from '@theia/terminal/lib/browser/termin
 import { ScmContribution } from '@theia/scm/lib/browser/scm-contribution';
 import { DebugFrontendApplicationContribution } from '@theia/debug/lib/browser/debug-frontend-application-contribution';
 import { TestViewContribution } from '@theia/test/lib/browser/view/test-view-contribution';
-import { SearchInWorkspaceFrontendContribution } from '@theia/search-in-workspace/lib/browser/search-in-workspace-frontend-contribution';
-import { FileNavigatorContribution } from '@theia/navigator/lib/browser/navigator-contribution';
-import { OutlineViewContribution } from '@theia/outline-view/lib/browser/outline-view-contribution';
 import { AIChatContribution } from '@theia/ai-chat-ui/lib/browser/ai-chat-ui-contribution';
 
 /**
@@ -85,8 +82,9 @@ import { AIChatContribution } from '@theia/ai-chat-ui/lib/browser/ai-chat-ui-con
  * `MenuContribution` whose `registerMenus()` adds a `[...MAIN_MENU_BAR, ...]`
  * submenu. Filtering them out of the `MenuContribution` type removes the whole
  * top-level menu (Selection / Go / Terminal / Run), leaving only File / Edit /
- * View / Help. The IDE view contributions are included too, so their
+ * View / Help. The diluted IDE view contributions are included too, so their
  * "Toggle <view>" leaf entries under the View menu vanish along with the views.
+ * Explorer/Search/Outline are intentionally omitted for MS15.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const MENU_FILTERED: Array<new (...args: any[]) => object> = [
@@ -98,9 +96,6 @@ const MENU_FILTERED: Array<new (...args: any[]) => object> = [
     // IDE side views (drop their View-menu toggle + context-menu entries)
     ScmContribution,
     TestViewContribution,
-    SearchInWorkspaceFrontendContribution,
-    FileNavigatorContribution,
-    OutlineViewContribution,
     // Stock @theia/ai-chat-ui chat view: ArsChat's own chat widget is the primary
     // UI, so the redundant stock AI chat view is hidden to avoid a "double chat"
     // (M6 e-26, orchestrator decision). Removes its View-menu toggle entry too.
@@ -112,17 +107,15 @@ const MENU_FILTERED: Array<new (...args: any[]) => object> = [
  * `AbstractViewContribution` bound to `FrontendApplicationContribution`; its
  * `initializeLayout()` self-adds the view to the left panel. Filtering them out
  * of `FrontendApplicationContribution` prevents that, so the IDE view never
- * appears in the activity bar. `DebugFrontendApplicationContribution` is here
- * too (its activity-bar "Run and Debug" icon), on top of its "Run" menu removal.
+ * appears in the activity bar. Explorer/Search/Outline are intentionally omitted
+ * for MS15. `DebugFrontendApplicationContribution` is here too (its activity-bar
+ * "Run and Debug" icon), on top of its "Run" menu removal.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ACTIVITY_BAR_FILTERED: Array<new (...args: any[]) => object> = [
     ScmContribution,                       // Source Control
     DebugFrontendApplicationContribution,  // Run and Debug
     TestViewContribution,                  // Test
-    SearchInWorkspaceFrontendContribution, // Search
-    FileNavigatorContribution,             // Explorer
-    OutlineViewContribution,               // Outline
     AIChatContribution                     // stock AI chat view (double-chat avoidance)
 ];
 
@@ -135,9 +128,10 @@ function isInstanceOfAny(obj: object, classes: Array<new (...args: any[]) => obj
  * IDE dilution: strips IDE-flavoured top-level menus and left activity-bar
  * icons that the M5 `@theia/plugin-ext` / `plugin-ext-vscode` / `vsx-registry`
  * dependency expansion pulled back in (scm / debug / task / test / notebook /
- * search-in-workspace / ...). Restores the PoC-2 "chat app" chrome: a File /
- * Edit / View / Help menu bar and an activity bar carrying only ArsChat's own
- * views.
+ * ...), while keeping the MS15 user-facing Explorer/Search/Outline views.
+ * Restores the PoC-2 "chat app" chrome: a File / Edit / View / Help menu bar
+ * and an activity bar carrying only ArsChat's own views plus the explicitly
+ * restored stock views.
  */
 @injectable()
 export class ArschatMenuFilterContribution implements FilterContribution {
@@ -153,8 +147,8 @@ export class ArschatMenuFilterContribution implements FilterContribution {
             }
         ]);
 
-        // 2. Activity bar: remove SCM / Debug / Test / Search / Explorer /
-        //    Outline icons by suppressing their initializeLayout().
+        // 2. Activity bar: remove SCM / Debug / Test / stock AI chat icons by
+        //    suppressing their initializeLayout().
         registry.addFilters([FrontendApplicationContribution], [
             contrib => {
                 const keep = !isInstanceOfAny(contrib, ACTIVITY_BAR_FILTERED);

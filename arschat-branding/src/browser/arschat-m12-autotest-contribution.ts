@@ -147,8 +147,7 @@ export class ArschatM12AutotestContribution implements FrontendApplicationContri
             ...this.shell.getWidgets('right').map(widget => widget.id)
         ];
         const idePatterns = [
-            'scm', 'debug', 'test', 'search-in-workspace', 'navigator', 'explorer',
-            'files', 'outline', 'chat-view-widget'
+            'scm', 'debug', 'test', 'chat-view-widget'
         ];
         const strays = sideIds.filter(id =>
             !id.startsWith('arschat') &&

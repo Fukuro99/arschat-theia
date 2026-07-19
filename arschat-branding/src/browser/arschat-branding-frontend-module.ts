@@ -3,7 +3,7 @@
 //
 // Moved here from arschat-core during the M1 package re-org. Registers:
 //   - the IDE-dilution FilterContribution (removes Selection/Go/Terminal menus)
-//   - the flag-gated PoC-3/PoC-4/M12 frontend regression autotests
+//   - the flag-gated PoC-3/PoC-4/M12/M15 frontend regression autotests
 //
 // The chat view itself (widget, view contribution, custom response renderer)
 // now lives in arschat-chat. This module carries only shell-level branding /
@@ -18,8 +18,9 @@ import { FilterContribution } from '@theia/core';
 import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { ArschatMenuFilterContribution } from './arschat-ide-dilution';
 import { ArschatStaleIdeViewCleanup } from './arschat-stale-ide-view-cleanup';
-import { ArschatExtensionsViewRestorer } from './arschat-extensions-view-restorer';
+import { ArschatSideViewRestorer } from './arschat-extensions-view-restorer';
 import { ArschatM12AutotestContribution } from './arschat-m12-autotest-contribution';
+import { ArschatM15AutotestContribution } from './arschat-m15-autotest-contribution';
 import { ArschatPoc3AutotestContribution } from './arschat-poc3-autotest-contribution';
 import { ArschatPoc4AutotestContribution } from './arschat-poc4-autotest-contribution';
 
@@ -35,11 +36,11 @@ export default new ContainerModule(bind => {
     bind(ArschatStaleIdeViewCleanup).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatStaleIdeViewCleanup);
 
-    // MS12: persisted layouts saved while Extensions was diluted do not re-run the
-    // stock VSX initializeLayout path, so restore the view container after layout
-    // initialization without activating/revealing it.
-    bind(ArschatExtensionsViewRestorer).toSelf().inSingletonScope();
-    bind(FrontendApplicationContribution).toService(ArschatExtensionsViewRestorer);
+    // MS12/MS15: persisted layouts saved while stock views were diluted do not
+    // re-run the stock initializeLayout paths, so restore the configured side
+    // views after layout initialization without activating/revealing them.
+    bind(ArschatSideViewRestorer).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatSideViewRestorer);
 
     // PoC-3: flag-gated autotest (opens the vsx-registry Extensions view,
     // logs deployed plugins, dumps ESLint problem markers).
@@ -55,4 +56,9 @@ export default new ContainerModule(bind => {
     // Open VSX-backed live search.
     bind(ArschatM12AutotestContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatM12AutotestContribution);
+
+    // MS15: flag-gated frontend autotest for restored Explorer/Search/Outline
+    // plus the updated dilution regression expectations.
+    bind(ArschatM15AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM15AutotestContribution);
 });
