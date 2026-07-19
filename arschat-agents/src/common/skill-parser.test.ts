@@ -41,12 +41,28 @@ describe('skill markdown parser (gray-matter based)', () => {
     });
 
     it('round-trips through buildSkillMarkdown', () => {
-        const content = buildSkillMarkdown({ name: 'N', description: 'D', trigger: '/t', body: 'BODY' });
+        const content = buildSkillMarkdown({ name: 'N', description: 'D', trigger: '/t', tools: ['arschat_render_ui'], body: 'BODY' });
         const skill = parseSkillMarkdown('t', '/t.md', content);
         expect(skill).toBeDefined();
         expect(skill!.name).toBe('N');
         expect(skill!.description).toBe('D');
         expect(skill!.trigger).toBe('/t');
+        expect(skill!.tools).toEqual(['arschat_render_ui']);
         expect(skill!.body).toBe('BODY');
+    });
+
+    it('parses tools from frontmatter', () => {
+        const md = [
+            '---',
+            'name: UI',
+            'description: D',
+            'tools:',
+            '  - arschat_render_ui',
+            '  - arschat_update_ui',
+            '---',
+            'BODY'
+        ].join('\n');
+        const skill = parseSkillMarkdown('ui', '/ui.md', md);
+        expect(skill!.tools).toEqual(['arschat_render_ui', 'arschat_update_ui']);
     });
 });

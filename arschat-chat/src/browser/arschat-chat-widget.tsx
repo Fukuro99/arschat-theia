@@ -45,6 +45,8 @@ import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocatio
 import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
 import { generateUuid } from '@theia/core/lib/common/uuid';
 import { TerminalCommands } from '@theia/terminal/lib/browser/terminal-frontend-contribution';
+import { ARSCHAT_BASE_TOOL_IDS, ARSCHAT_UI_TOOL_IDS, RENDER_UI_TOOL_ID } from 'arschat-tools/lib/common/tool-ids';
+import { ArschatUiInteractionService } from 'arschat-tools/lib/browser/arschat-ui-interaction-service';
 import {
     ArschatProviderKind,
     PROVIDERS
@@ -61,6 +63,9 @@ import { removeRequestFromModel, RequestTreeModel } from './arschat-request-tree
 import { ArschatStatsStore } from './arschat-stats-store';
 import { computeMessageStats, hasDisplayableStats, ResponseTokenUsageLike } from './arschat-message-stats';
 import { computeResizeTarget, DEFAULT_IMAGE_MAX_LONG_EDGE, ResizeTarget, shouldResizeImageMimeType } from './arschat-image-resize';
+import { BlockRenderer } from './interactive-ui/UIRenderer';
+import { normalizeInteractiveUIBlock } from './interactive-ui/schema';
+import type { InteractiveUIBlock } from './interactive-ui/types';
 
 interface PendingImage {
     /** base64 data (no data: prefix) */
@@ -85,11 +90,15 @@ interface ToolCallView {
     key: string;
     content: ToolCallChatResponseContent;
     /** derived UI state for the card. */
-    state: 'confirm' | 'running' | 'done' | 'denied';
+    state: 'confirm' | 'running' | 'done' | 'denied' | 'expired';
     /** whether the (potentially long) result body is expanded. */
     open?: boolean;
     /** subscriptions on `content`'s promises are wired exactly once. */
     wired?: boolean;
+    /** UI tool cards are disabled immediately after the default form is submitted. */
+    uiSubmitted?: boolean;
+    /** Restored unfinished UI calls no longer have a live handler to receive form data. */
+    uiExpired?: boolean;
 }
 
 interface UiMessage {
@@ -166,6 +175,9 @@ export class ArschatChatWidget extends ReactWidget {
     @inject(ToolInvocationRegistry)
     protected readonly toolInvocationRegistry!: ToolInvocationRegistry;
 
+    @inject(ArschatUiInteractionService)
+    protected readonly uiInteractionService!: ArschatUiInteractionService;
+
     @inject(CommandRegistry)
     protected readonly commandRegistry!: CommandRegistry;
 
@@ -214,6 +226,8 @@ export class ArschatChatWidget extends ReactWidget {
     /** slash-command skill suggestions currently shown under the input. */
     protected slashSuggestions: Skill[] = [];
     protected suggestionIndex = 0;
+    /** Skill-declared tool ids that stay enabled for this chat session after first activation. */
+    protected readonly activeSkillToolIds = new Set<string>();
 
     protected readonly toDispose = new DisposableCollection();
 
@@ -568,10 +582,22 @@ export class ArschatChatWidget extends ReactWidget {
         return this.sessionId;
     }
 
+    protected applyAgentToolGate(extraToolIds: string[] = []): void {
+        for (const id of extraToolIds) {
+            this.activeSkillToolIds.add(id);
+        }
+        const toolIds = [...new Set([...ARSCHAT_BASE_TOOL_IDS, ...this.activeSkillToolIds])];
+        const tools = this.toolInvocationRegistry.getFunctions(...toolIds);
+        const agent = this.chatAgentService.getAgent(ARSCHAT_CHAT_AGENT_ID) as { setToolRequests?: (tools: ToolRequest[]) => void } | undefined;
+        agent?.setToolRequests?.(tools);
+    }
+
     /** Clear the UI and forget the current session id so the next send starts fresh. */
     startNewSession(): void {
         this.abortIfSending();
         this.sessionId = undefined;
+        this.activeSkillToolIds.clear();
+        this.applyAgentToolGate();
         this.messages = [];
         this.pendingImages = [];
         this.setInputValue('');
@@ -618,17 +644,35 @@ export class ArschatChatWidget extends ReactWidget {
             return;
         }
         this.sessionId = session.id;
+        this.activeSkillToolIds.clear();
         this.messages = [];
         this.pendingImages = [];
         // Durations are looked up synchronously in appendRestoredRequest; make sure
         // the store's cache is loaded first (M6 e-25).
         await this.statsStore.ready();
         for (const req of session.model.getRequests()) {
+            this.restoreSkillToolGateFromRequest(req);
             this.appendRestoredRequest(req);
         }
+        this.applyAgentToolGate();
         this.uiService.notifySessionChanged(this.sessionId);
         this.update();
         this.focusInput();
+    }
+
+    protected restoreSkillToolGateFromRequest(req: ChatRequestModel): void {
+        // Recomputing from persisted slash text/tool calls is cheaper than changing the session schema and also restores old sessions.
+        const sourceText = req.request.displayText ?? req.request.text ?? '';
+        const expansion = this.skillService.expandInput(sourceText);
+        for (const id of expansion?.skill.tools ?? []) {
+            this.activeSkillToolIds.add(id);
+        }
+        const toolParts = (req.response.response.content as Array<{ kind?: string }>).filter(ToolCallChatResponseContent.is);
+        for (const part of toolParts) {
+            if (part.name && ARSCHAT_UI_TOOL_IDS.includes(part.name)) {
+                this.activeSkillToolIds.add(part.name);
+            }
+        }
     }
 
     protected appendRestoredRequest(req: ChatRequestModel): void {
@@ -654,6 +698,12 @@ export class ArschatChatWidget extends ReactWidget {
         // Restored responses are already finished; surface their tool calls as
         // completed cards (they never re-enter the confirm state).
         this.syncToolCalls(assistant, req.response);
+        for (const view of assistant.toolCalls ?? []) {
+            if (this.isArschatUiTool(view.content) && !view.content.finished) {
+                view.state = 'expired';
+                view.uiExpired = true;
+            }
+        }
         this.messages.push(assistant);
     }
 
@@ -850,6 +900,9 @@ export class ArschatChatWidget extends ReactWidget {
             this.chatService.cancelRequest(this.sessionId, this.inflightRequestId).catch(() => { /* noop */ });
         }
         if (this.sending) {
+            this.uiInteractionService.rejectAll(new Error('Chat request canceled'));
+        }
+        if (this.sending) {
             this.sendSeq++;
         }
         this.sending = false;
@@ -857,6 +910,7 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected async abort(): Promise<void> {
+        this.uiInteractionService.rejectAll(new Error('Chat request canceled'));
         if (this.sessionId && this.inflightRequestId) {
             await this.chatService.cancelRequest(this.sessionId, this.inflightRequestId).catch(() => { /* noop */ });
         }
@@ -913,6 +967,7 @@ export class ArschatChatWidget extends ReactWidget {
             const variables: AIVariableResolutionRequest[] = imagesForModel.map(img =>
                 ImageContextVariable.createRequest({ data: img.data, mimeType: img.mimeType, name: img.name })
             );
+            this.applyAgentToolGate(expansion?.skill.tools ?? []);
             console.log(`[arschat-chat] sending request (provider='${provider}', model='${model}', persona='${this.activePersonaId}', skill=${expansion ? 'yes' : 'no'}, resolved LanguageModel id='${modelId ?? '<none>'}', images=${imagesForModel.length})`);
             const invocation = await this.chatService.sendRequest(
                 sessionId,
@@ -1065,6 +1120,11 @@ export class ArschatChatWidget extends ReactWidget {
         view.wired = true;
         const content = view.content;
         content.needsUserConfirmation.then(() => {
+            if (this.isArschatUiTool(content)) {
+                // Last-resort guard: UI tools own their form interaction, so Theia confirmation must never hold the handler.
+                content.confirm();
+                return;
+            }
             if (view.state !== 'denied' && !content.finished) {
                 view.state = 'confirm';
                 this.scheduleRender();
@@ -1093,6 +1153,10 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     /** Chat/session id used to scope "このセッション中" tool-confirmation overrides. */
+    protected isArschatUiTool(content: ToolCallChatResponseContent): boolean {
+        return !!content.name && ARSCHAT_UI_TOOL_IDS.includes(content.name);
+    }
+
     protected confirmationChatId(): string {
         return this.sessionId ?? '';
     }
@@ -2038,6 +2102,9 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected renderToolCard(view: ToolCallView): React.ReactElement {
+        if (view.content.name === RENDER_UI_TOOL_ID) {
+            return this.renderUiToolCard(view);
+        }
         const { content, state } = view;
         const toolName = content.name ?? 'tool';
         const argsLabel = content.arguments && content.arguments.length > 0 ? content.arguments : '';
@@ -2097,10 +2164,71 @@ export class ArschatChatWidget extends ReactWidget {
         );
     }
 
+    protected parseRenderUiBlock(view: ToolCallView): InteractiveUIBlock | undefined {
+        const args = view.content.arguments;
+        if (!args || !args.trim()) {
+            return undefined;
+        }
+        try {
+            return normalizeInteractiveUIBlock(JSON.parse(args));
+        } catch {
+            return undefined;
+        }
+    }
+
+    protected renderUiToolCard(view: ToolCallView): React.ReactElement {
+        const block = this.parseRenderUiBlock(view);
+        const state = view.state;
+        const isExpired = view.uiExpired || state === 'expired';
+        const isPendingParse = !isExpired && !view.content.finished && !block;
+        return (
+            <div key={view.key} className={`arschat-tool-card arschat-tool-card-${state} arschat-ui-tool-card`}>
+                <div className='arschat-tool-card-head'>
+                    {state === 'running' && !view.uiSubmitted
+                        ? <span className='arschat-tool-card-spinner' />
+                        : <span className={`arschat-tool-card-status ${this.toolStatusMeta(state).cls}`}>{this.toolStatusMeta(state).icon}</span>}
+                    <span className='arschat-tool-card-name'>{RENDER_UI_TOOL_ID}</span>
+                    <span className='arschat-tool-card-label'>{view.uiSubmitted ? 'Submitted' : this.toolStatusMeta(state).label}</span>
+                </div>
+                {isPendingParse && (
+                    <div className='arschat-tool-card-result'>Preparing UI...</div>
+                )}
+                {isExpired && (
+                    <div className='arschat-tool-card-result arschat-tool-card-result-denied'>
+                        このフォームは有効期限が切れました。
+                    </div>
+                )}
+                {!isExpired && !isPendingParse && !block && (
+                    <div className='arschat-tool-card-result arschat-tool-card-result-denied'>
+                        Invalid UI block.
+                    </div>
+                )}
+                {!isExpired && block && (
+                    <BlockRenderer
+                        block={block}
+                        disabled={view.uiSubmitted || state === 'done' || state === 'denied'}
+                        onSubmit={(_uiId, action, data) => this.onRenderUiSubmit(view, block.id, action, data)}
+                    />
+                )}
+            </div>
+        );
+    }
+
+    protected onRenderUiSubmit(view: ToolCallView, uiId: string, action: string, data: Record<string, any>): void {
+        const toolCallId = view.content.id;
+        if (view.uiSubmitted || view.uiExpired || view.content.finished || !toolCallId) {
+            return;
+        }
+        view.uiSubmitted = true;
+        this.uiInteractionService.resolve(toolCallId, { uiId, action, data });
+        this.update();
+    }
+
     protected toolStatusMeta(state: ToolCallView['state']): { icon: string; label: string; cls: string } {
         switch (state) {
             case 'confirm': return { icon: '🛡', label: '承認待ち', cls: 'confirm' };
             case 'running': return { icon: '', label: '実行中…', cls: 'running' };
+            case 'expired': return { icon: '!', label: '期限切れ', cls: 'denied' };
             case 'denied': return { icon: '✕', label: '拒否', cls: 'denied' };
             case 'done':
             default: return { icon: '✓', label: '完了', cls: 'done' };

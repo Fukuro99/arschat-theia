@@ -18,6 +18,8 @@ import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-va
 import { AIVariableResolutionRequest } from '@theia/ai-core';
 import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
 import { ToolRequest } from '@theia/ai-core/lib/common/language-model';
+import { ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID } from 'arschat-tools/lib/common/tool-ids';
+import { ArschatUiInteractionService } from 'arschat-tools/lib/browser/arschat-ui-interaction-service';
 import { fireEvent, render } from '@testing-library/react';
 import { act } from 'react';
 import { ArschatProviderKind, OPENAI_CUSTOM_ENDPOINTS_PREF, PREF_ACTIVE_MODEL, PREF_ACTIVE_PROVIDER } from 'arschat-providers/lib/browser/arschat-provider-preferences';
@@ -36,6 +38,7 @@ describe('ArschatChatWidget', () => {
     let storeSessionsCalls: number;
     let storedSessions: any[];
     let fakeRequests: any[];
+    let restoredRequests: any[];
     let restoredSessionId: string | undefined;
     /** durations recorded / forgotten via the fake ArschatStatsStore (M6 e-25). */
     let recordedDurations: Array<{ requestId: string; durationMs: number }>;
@@ -58,6 +61,9 @@ describe('ArschatChatWidget', () => {
     let collapsePanel: jest.Mock;
     let expandPanel: jest.Mock;
     let activateBottomWidget: jest.Mock;
+    let expandInputMock: jest.Mock;
+    let agentToolRequests: ToolRequest[][];
+    let uiInteractionService: ArschatUiInteractionService;
 
     beforeEach(async () => {
         registeredTools = new Map<string, ToolRequest>();
@@ -67,6 +73,7 @@ describe('ArschatChatWidget', () => {
         storeSessionsCalls = 0;
         storedSessions = [];
         fakeRequests = [];
+        restoredRequests = [];
         restoredSessionId = undefined;
         recordedDurations = [];
         forgottenRequestIds = [];
@@ -100,6 +107,9 @@ describe('ArschatChatWidget', () => {
         activateBottomWidget = jest.fn((widget: { isVisible: boolean }) => {
             widget.isVisible = true;
         });
+        expandInputMock = jest.fn(() => undefined);
+        agentToolRequests = [];
+        uiInteractionService = new ArschatUiInteractionService();
         fetchCustomEndpointModels = jest.fn(async (kind: ArschatProviderKind) => liveCustomModels.get(kind) ?? []);
         getModelsForProvider = jest.fn(async (_kind: ArschatProviderKind) => [] as any[]);
         updateCustomEndpointUrl = jest.fn(async (kind: ArschatProviderKind, rawUrl: string) => {
@@ -183,7 +193,7 @@ describe('ArschatChatWidget', () => {
                 }),
                 getOrRestoreSession: async (id: string) => {
                     restoredSessionId = id;
-                    return { id, model: { getRequests: () => [] } };
+                    return { id, model: { getRequests: () => restoredRequests } };
                 },
                 sendRequest: async (sessionId: string, request: { text: string; displayText?: string; variables?: AIVariableResolutionRequest[] }) => {
                     sendRequestCalls.push({ sessionId, request });
@@ -212,7 +222,13 @@ describe('ArschatChatWidget', () => {
                 record: async (requestId: string, durationMs: number) => { recordedDurations.push({ requestId, durationMs }); },
                 forget: async (requestId: string) => { forgottenRequestIds.push(requestId); }
             } as unknown as ArschatStatsStore);
-            bind(ChatAgentService).toConstantValue({} as ChatAgentService);
+            bind(ChatAgentService).toConstantValue({
+                getAgent: () => ({
+                    setToolRequests: (tools: ToolRequest[]) => {
+                        agentToolRequests.push(tools);
+                    }
+                })
+            } as unknown as ChatAgentService);
             bind(PersonaService).toConstantValue({
                 ready: async () => undefined,
                 getPersonas: () => [
@@ -227,7 +243,7 @@ describe('ArschatChatWidget', () => {
                 ready: async () => undefined,
                 getSkills: () => [],
                 filterByQuery: () => [],
-                expandInput: () => undefined,
+                expandInput: expandInputMock,
                 onDidChange: () => ({ dispose(): void { /* noop */ } })
             } as unknown as SkillService);
             bind(ArschatChatUiService).toConstantValue({
@@ -250,8 +266,12 @@ describe('ArschatChatWidget', () => {
                 }
             } as unknown as ToolConfirmationManager);
             bind(ToolInvocationRegistry).toConstantValue({
-                getFunction: (toolId: string) => registeredTools.get(toolId)
+                getFunction: (toolId: string) => registeredTools.get(toolId),
+                getFunctions: (...toolIds: string[]) => toolIds
+                    .map(toolId => registeredTools.get(toolId))
+                    .filter((tool): tool is ToolRequest => !!tool)
             } as unknown as ToolInvocationRegistry);
+            bind(ArschatUiInteractionService).toConstantValue(uiInteractionService);
             bind(ArschatChatWidget).toSelf();
         });
         const container = new Container();
@@ -577,6 +597,99 @@ describe('ArschatChatWidget', () => {
             expect(asAny(widget).sending).toBe(false);
         } finally {
             resizeSpy.mockRestore();
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('gates UI tools on skill activation and keeps them sticky for the session', async () => {
+        for (const id of [...ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID]) {
+            registerTool(id);
+        }
+        expandInputMock.mockReturnValueOnce({
+            expanded: 'expanded ui prompt',
+            display: '/ui make a form',
+            skill: { id: 'ui', tools: [RENDER_UI_TOOL_ID] }
+        });
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).inputValue = '/ui make a form';
+        const consoleLog = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            await asAny(widget).send();
+            expect(sendRequestCalls[0].request.text).toBe('expanded ui prompt');
+            expect(sendRequestCalls[0].request.displayText).toBe('/ui make a form');
+            expect(agentToolRequests[agentToolRequests.length - 1].map(tool => tool.id)).toEqual([...ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID]);
+
+            expandInputMock.mockReturnValueOnce(undefined);
+            asAny(widget).inputValue = 'follow-up';
+            await asAny(widget).send();
+            expect(sendRequestCalls[1].request.text).toBe('follow-up');
+            expect(agentToolRequests[agentToolRequests.length - 1].map(tool => tool.id)).toEqual([...ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID]);
+        } finally {
+            consoleLog.mockRestore();
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('keeps UI tools out of the agent request when no UI skill has been activated', async () => {
+        for (const id of [...ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID]) {
+            registerTool(id);
+        }
+        asAny(widget).sessionId = 'sess-1';
+        asAny(widget).inputValue = 'plain prompt';
+        const consoleLog = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            await asAny(widget).send();
+            expect(agentToolRequests[agentToolRequests.length - 1].map(tool => tool.id)).toEqual(ARSCHAT_BASE_TOOL_IDS);
+        } finally {
+            consoleLog.mockRestore();
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('clears sticky skill tools when loading a non-UI session', async () => {
+        for (const id of [...ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID]) {
+            registerTool(id);
+        }
+        asAny(widget).activeSkillToolIds.add(RENDER_UI_TOOL_ID);
+        restoredRequests = [{
+            id: 'plain-req',
+            request: { text: 'plain prompt', displayText: undefined },
+            response: { response: { content: [] } }
+        }];
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            await asAny(widget).loadSession('plain-session');
+            expect(restoredSessionId).toBe('plain-session');
+            expect(agentToolRequests[agentToolRequests.length - 1].map(tool => tool.id)).toEqual(ARSCHAT_BASE_TOOL_IDS);
+        } finally {
+            updateSpy.mockRestore();
+        }
+    });
+
+    it('restores sticky UI tools when loading a session that activated /ui', async () => {
+        for (const id of [...ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID]) {
+            registerTool(id);
+        }
+        expandInputMock.mockImplementation((input: string) => input.startsWith('/ui')
+            ? { expanded: 'expanded ui prompt', display: input, skill: { id: 'ui', tools: [RENDER_UI_TOOL_ID] } }
+            : undefined);
+        restoredRequests = [{
+            id: 'ui-req',
+            request: { text: 'expanded ui prompt', displayText: '/ui make a form' },
+            response: { response: { content: [] } }
+        }];
+        const updateSpy = jest.spyOn(widget, 'update').mockImplementation(() => undefined);
+
+        try {
+            await asAny(widget).loadSession('ui-session');
+            expect(restoredSessionId).toBe('ui-session');
+            expect(agentToolRequests[agentToolRequests.length - 1].map(tool => tool.id)).toEqual([...ARSCHAT_BASE_TOOL_IDS, RENDER_UI_TOOL_ID]);
+        } finally {
             updateSpy.mockRestore();
         }
     });
@@ -1375,6 +1488,105 @@ describe('ArschatChatWidget', () => {
         expect(view.state).toBe('denied');
         expect(tc.finished).toBe(true);
         expect((tc.result as any).denied).toBe(true);
+    });
+
+    it('auto-confirms UI tools if Theia confirmation is requested anyway', async () => {
+        const tc = new ToolCallChatResponseContentImpl('tc-ui-confirm', RENDER_UI_TOOL_ID, '{}', false, undefined);
+        const confirmedProbe = tc.confirmed;
+        const msg: any = { id: 1, author: 'assistant', text: '', streaming: true };
+        asAny(widget).syncToolCalls(msg, fakeResponseWith(tc));
+        tc.requestUserConfirmation();
+        await expect(confirmedProbe).resolves.toBe(true);
+        expect(msg.toolCalls[0].state).toBe('running');
+    });
+
+    it('renders arschat_render_ui as a form and resolves submitted data as the tool result path', async () => {
+        const block = {
+            id: 'survey',
+            mode: 'default',
+            title: 'Survey',
+            state: { form: { name: '' } },
+            root: {
+                primitive: 'box',
+                children: [
+                    { primitive: 'input', bind: 'form.name', props: { inputId: 'name-input', placeholder: 'Name' } }
+                ]
+            },
+            actions: [{ type: 'submit', label: 'Send', variant: 'primary' }]
+        };
+        const tc = new ToolCallChatResponseContentImpl('tc-ui', RENDER_UI_TOOL_ID, JSON.stringify(block), false, undefined);
+        const msg: any = { id: 1, author: 'assistant', text: '', streaming: true };
+        asAny(widget).syncToolCalls(msg, fakeResponseWith(tc));
+        asAny(widget).messages = [msg];
+        const pending = uiInteractionService.awaitInteraction('tc-ui');
+
+        const element = render(widget.render());
+        const input = element.container.querySelector('#name-input') as HTMLInputElement | null;
+        expect(input).toBeTruthy();
+        fireEvent.change(input!, { target: { value: 'Ada' } });
+        fireEvent.click(element.getByText('Send'));
+
+        await expect(pending).resolves.toEqual({
+            uiId: 'survey',
+            action: 'submit',
+            data: { form: { name: 'Ada' } }
+        });
+        expect(msg.toolCalls[0].uiSubmitted).toBe(true);
+    });
+
+    it('shows a placeholder for partial streaming arschat_render_ui JSON', () => {
+        const tc = new ToolCallChatResponseContentImpl('tc-ui-partial', RENDER_UI_TOOL_ID, '{"id":"survey"', false, undefined);
+        const msg: any = { id: 1, author: 'assistant', text: '', streaming: true };
+        asAny(widget).syncToolCalls(msg, fakeResponseWith(tc));
+        asAny(widget).messages = [msg];
+        const element = render(widget.render());
+        expect(element.queryByText('Preparing UI...')).toBeTruthy();
+        expect(element.queryByText('Invalid UI block.')).toBeFalsy();
+    });
+
+    it('falls back instead of throwing for finished invalid arschat_render_ui arguments', () => {
+        const tc = new ToolCallChatResponseContentImpl('tc-ui-bad', RENDER_UI_TOOL_ID, '{bad json', true, 'bad args');
+        const msg: any = { id: 1, author: 'assistant', text: '', streaming: true };
+        asAny(widget).syncToolCalls(msg, fakeResponseWith(tc));
+        asAny(widget).messages = [msg];
+        const element = render(widget.render());
+        expect(element.queryByText('Invalid UI block.')).toBeTruthy();
+    });
+
+    it('restores unfinished arschat_render_ui calls as expired and does not buffer stale submits', () => {
+        const block = {
+            id: 'survey',
+            mode: 'default',
+            title: 'Survey',
+            state: { form: { name: '' } },
+            root: {
+                primitive: 'box',
+                children: [
+                    { primitive: 'input', bind: 'form.name', props: { inputId: 'stale-name-input', placeholder: 'Name' } }
+                ]
+            },
+            actions: [{ type: 'submit', label: 'Send', variant: 'primary' }]
+        };
+        const tc = new ToolCallChatResponseContentImpl('tc-ui-stale', RENDER_UI_TOOL_ID, JSON.stringify(block), false, undefined);
+        const req: any = {
+            id: 'req-stale-ui',
+            request: { text: 'restore ui', displayText: undefined },
+            response: fakeResponseWith(tc)
+        };
+
+        asAny(widget).appendRestoredRequest(req);
+        const assistant = asAny(widget).messages[1];
+        const view = assistant.toolCalls[0];
+        expect(view.state).toBe('expired');
+        expect(view.uiExpired).toBe(true);
+
+        const element = render(widget.render());
+        expect(element.queryByText('このフォームは有効期限が切れました。')).toBeTruthy();
+        expect(element.queryByText('Send')).toBeFalsy();
+        expect(element.container.querySelector('#stale-name-input')).toBeFalsy();
+
+        asAny(widget).onRenderUiSubmit(view, 'survey', 'submit', { form: { name: 'Ada' } });
+        expect((uiInteractionService as any).earlyResolved.has('tc-ui-stale')).toBe(false);
     });
 
     // ---- M6 e-24: hover message actions ----

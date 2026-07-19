@@ -1,0 +1,192 @@
+.iui-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  margin: 6px 0;
+  color: var(--theia-foreground, #cccccc);
+  background-color: var(--theia-editorWidget-background, #252526);
+  border: 1px solid var(--theia-editorGroup-border, #3c3c3c);
+  border-radius: 8px;
+  font-size: 0.875rem;
+}
+
+.iui-block-loading {
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+}
+
+.iui-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  color: var(--theia-foreground, #cccccc);
+  border-bottom: 1px solid var(--theia-editorGroup-border, #3c3c3c);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.iui-block-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--theia-editorGroup-border, #3c3c3c);
+}
+
+.iui-block-submitted {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 4px;
+  color: var(--theia-descriptionForeground, #8a8a8a);
+  border-top: 1px solid var(--theia-editorGroup-border, #3c3c3c);
+  font-size: 0.75rem;
+}
+
+.iui-block-submitted::before {
+  content: "OK";
+  color: #22c55e;
+  font-size: 0.875rem;
+}
+
+.iui-block-live {
+  width: 100%;
+  box-sizing: border-box;
+  border-color: var(--theia-button-background, #0e639c);
+}
+
+.iui-block-finished {
+  opacity: 0.85;
+}
+
+.iui-live-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  color: #fff;
+  background: var(--theia-button-background, #0e639c);
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.iui-live-badge-finished {
+  color: var(--theia-descriptionForeground, #8a8a8a);
+  background: var(--theia-editorGroup-border, #3c3c3c);
+}
+
+.iui-block-content-disabled {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.iui-action-btn,
+.iui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: none;
+  outline: none;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.iui-action-btn:focus-visible,
+.iui-button:focus-visible {
+  outline: 2px solid var(--theia-focusBorder, var(--theia-button-background, #0e639c));
+  outline-offset: 2px;
+}
+
+.iui-action-btn-primary,
+.iui-button-primary {
+  color: #fff;
+  background-color: var(--theia-button-background, #0e639c);
+}
+
+.iui-action-btn-primary:hover,
+.iui-button-primary:hover {
+  background-color: var(--theia-button-hoverBackground, var(--theia-button-background, #0e639c));
+}
+
+.iui-action-btn-secondary,
+.iui-button-secondary {
+  color: var(--theia-descriptionForeground, #8a8a8a);
+  background-color: transparent;
+  border: 1px solid var(--theia-editorGroup-border, #3c3c3c);
+}
+
+.iui-action-btn-secondary:hover,
+.iui-button-secondary:hover {
+  color: var(--theia-foreground, #cccccc);
+  background-color: var(--theia-toolbar-hoverBackground, rgba(255, 255, 255, 0.07));
+}
+
+.iui-action-btn-danger,
+.iui-button-danger {
+  color: #fff;
+  background-color: #ef4444;
+}
+
+.iui-input:focus,
+.iui-select:focus {
+  border-color: var(--theia-focusBorder, var(--theia-button-background, #0e639c)) !important;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(14, 99, 156, 0.2);
+}
+
+.iui-slider {
+  appearance: none;
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--theia-editorGroup-border, #3c3c3c);
+}
+
+.iui-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: var(--theia-button-background, #0e639c);
+  cursor: pointer;
+}
+
+.iui-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--theia-editorGroup-border, #3c3c3c) transparent;
+}
+
+.iui-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--theia-editorGroup-border, #3c3c3c);
+  border-top-color: var(--theia-button-background, #0e639c);
+  border-radius: 50%;
+  animation: iui-spin 0.7s linear infinite;
+}
+
+.iui-unknown-primitive {
+  display: inline-block;
+  padding: 2px 6px;
+  color: #f59e0b;
+  border: 1px dashed #f59e0b;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.75rem;
+}
+
+@keyframes iui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

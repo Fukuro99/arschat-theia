@@ -24,6 +24,11 @@ export const RUN_COMMAND_TOOL_ID = 'run_command';
 export const WEB_SEARCH_TOOL_ID = 'web_search';
 export const FETCH_PAGE_TOOL_ID = 'fetch_page';
 
+// MS13 Phase 1: primitive interactive UI rendering in default mode. This tool is
+// registered in the global ToolInvocationRegistry but only attached to the
+// ArsChat agent when a skill frontmatter declares it (the built-in /ui skill).
+export const RENDER_UI_TOOL_ID = 'arschat_render_ui';
+
 /** Every ArsChat AI tool id the frontend module resolves and attaches to the agent. */
 export const ARSCHAT_ALL_TOOL_IDS = [
     ...ARSCHAT_FILE_TOOL_IDS,
@@ -31,3 +36,9 @@ export const ARSCHAT_ALL_TOOL_IDS = [
     WEB_SEARCH_TOOL_ID,
     FETCH_PAGE_TOOL_ID
 ];
+
+/** M5 baseline tools that stay available without a skill gate. */
+export const ARSCHAT_BASE_TOOL_IDS = [...ARSCHAT_ALL_TOOL_IDS];
+
+/** Interactive UI tools exposed only by skill frontmatter. */
+export const ARSCHAT_UI_TOOL_IDS = [RENDER_UI_TOOL_ID];

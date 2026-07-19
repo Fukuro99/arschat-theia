@@ -80,6 +80,7 @@ export class CommandRunnerServiceImpl implements CommandRunnerService {
             const stderrChunks: Buffer[] = [];
             let timedOut = false;
             let settled = false;
+            let timer: NodeJS.Timeout;
 
             let proc: ChildProcess;
             try {
@@ -99,15 +100,10 @@ export class CommandRunnerServiceImpl implements CommandRunnerService {
                 return;
             }
 
-            const timer = setTimeout(() => {
-                timedOut = true;
-                this.killTree(proc);
-            }, timeoutMs);
-
             proc.stdout?.on('data', (d: Buffer) => stdoutChunks.push(d));
             proc.stderr?.on('data', (d: Buffer) => stderrChunks.push(d));
 
-            proc.on('close', code => {
+            const finish = (code: number | null): void => {
                 if (settled) {
                     return;
                 }
@@ -126,7 +122,21 @@ export class CommandRunnerServiceImpl implements CommandRunnerService {
                     truncated,
                     timedOut
                 });
-            });
+            };
+
+            timer = setTimeout(() => {
+                timedOut = true;
+                this.killTree(proc);
+                try {
+                    proc.kill();
+                } catch { /* ignore */ }
+                proc.stdout?.destroy();
+                proc.stderr?.destroy();
+                proc.unref();
+                finish(-1);
+            }, timeoutMs);
+
+            proc.on('close', code => finish(code));
 
             proc.on('error', err => {
                 if (settled) {

@@ -8,4 +8,9 @@ export default async (): Promise<Config.InitialOptions> => ({
         '^.+\\.(ts)$': 'ts-jest',
     },
     testEnvironment: 'node',
+    setupFiles: ['<rootDir>/configs/jest-setup.js'],
+    moduleNameMapper: {
+        '^vscode-languageserver-types': require.resolve('vscode-languageserver-types'),
+        '^msgpackr': require.resolve('msgpackr'),
+    },
 });

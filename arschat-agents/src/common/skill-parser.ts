@@ -14,6 +14,13 @@
 import matter = require('gray-matter');
 import { Skill, skillTrigger } from './skill';
 
+function parseTools(value: unknown): string[] {
+    const values = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
+    return values
+        .map(v => typeof v === 'string' ? v.trim() : '')
+        .filter(v => !!v);
+}
+
 /**
  * Parse one skill markdown document.
  * @param id       the skill id (filename without .md)
@@ -40,15 +47,22 @@ export function parseSkillMarkdown(id: string, filePath: string, content: string
         description,
         trigger: skillTrigger(id, data.trigger),
         body: (parsed.content ?? '').trim(),
+        tools: parseTools(data.tools),
         filePath
     };
 }
 
 /** Build a skill markdown file's content from fields (frontmatter + body). */
-export function buildSkillMarkdown(fields: { name: string; description: string; trigger?: string; body: string }): string {
+export function buildSkillMarkdown(fields: { name: string; description: string; trigger?: string; tools?: string[]; body: string }): string {
     let frontmatter = `name: ${fields.name}\ndescription: ${fields.description}`;
     if (fields.trigger) {
         frontmatter += `\ntrigger: ${fields.trigger}`;
+    }
+    if (fields.tools && fields.tools.length > 0) {
+        frontmatter += '\ntools:';
+        for (const tool of fields.tools) {
+            frontmatter += `\n  - ${tool}`;
+        }
     }
     return `---\n${frontmatter}\n---\n\n${fields.body}\n`;
 }

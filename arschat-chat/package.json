@@ -20,6 +20,7 @@
     "@theia/terminal": "1.71.2",
     "@theia/workspace": "1.71.2",
     "arschat-agents": "0.0.1",
+    "arschat-tools": "0.0.1",
     "arschat-providers": "0.0.1",
     "dompurify": "^3.1.0",
     "highlight.js": "^11.9.0",

@@ -26,8 +26,11 @@ import { SkillSummary } from '../common/persona';
 import { parseSkillMarkdown, buildSkillMarkdown } from '../common/skill-parser';
 import { SkillCatalogProvider } from './persona-service';
 
-/** The two sample skills seeded on first run. */
-const SAMPLE_SKILLS: Array<{ id: string; name: string; description: string; trigger: string; body: string }> = [
+const UI_SKILL_ID = 'ui';
+const UI_SKILL_SEED_MARKER = '.ui-seed-v1';
+
+/** Built-in skills seeded on first run. */
+const SAMPLE_SKILLS: Array<{ id: string; name: string; description: string; trigger: string; tools?: string[]; body: string }> = [
     {
         id: 'summarize',
         name: '要約',
@@ -68,6 +71,23 @@ const SAMPLE_SKILLS: Array<{ id: string; name: string; description: string; trig
             '## 注意',
             '- 固有名詞・コード・URL は翻訳しない',
             '- 原文のトーン（丁寧/カジュアル）を保つ'
+        ].join('\n')
+    },
+    {
+        id: UI_SKILL_ID,
+        name: 'Interactive UI',
+        description: 'Enable chat-rendered forms and interactive UI components.',
+        trigger: '/ui',
+        tools: ['arschat_render_ui'],
+        body: [
+            '# Interactive UI skill',
+            '',
+            'You may render a small interactive form in the chat by calling the `arschat_render_ui` tool.',
+            'Use this only when the user would benefit from entering structured data or choosing options.',
+            '',
+            'The tool accepts one UI block with `mode: "default"`, a `title`, an initial `state`, a `root` node, and `actions`.',
+            'Use bound inputs such as `bind: "form.name"` so the submitted state contains the user-entered values.',
+            'After the user submits the UI, the submitted data will be returned as the tool result.'
         ].join('\n')
     }
 ];
@@ -120,20 +140,35 @@ export class SkillService implements SkillCatalogProvider {
         try {
             const dir = await this.skillsDirUri();
             const dirExists = await this.fileService.exists(dir);
-            let hasMd = false;
+            const existingSkillIds = new Set<string>();
             if (dirExists) {
                 const stat = await this.fileService.resolve(dir);
-                hasMd = !!stat.children?.some(c => c.resource.path.ext === '.md');
+                for (const child of stat.children ?? []) {
+                    if (child.resource.path.ext === '.md') {
+                        existingSkillIds.add(child.resource.path.name);
+                    }
+                }
             } else {
                 await this.fileService.createFolder(dir);
             }
-            if (!hasMd) {
-                for (const s of SAMPLE_SKILLS) {
+            const markerUri = dir.resolve(UI_SKILL_SEED_MARKER);
+            const uiSeedAlreadyConsidered = await this.fileService.exists(markerUri);
+            const skillsToSeed = existingSkillIds.size === 0 && !uiSeedAlreadyConsidered
+                ? SAMPLE_SKILLS
+                : SAMPLE_SKILLS.filter(s => s.id === UI_SKILL_ID && !existingSkillIds.has(s.id) && !uiSeedAlreadyConsidered);
+            // When the marker exists and all .md files are gone, prefer preserving
+            // the user's explicit deletion over recreating SAMPLE_SKILLS or ui.md.
+            if (skillsToSeed.length > 0) {
+                for (const s of skillsToSeed) {
                     const uri = dir.resolve(`${s.id}.md`);
-                    const content = buildSkillMarkdown({ name: s.name, description: s.description, trigger: s.trigger, body: s.body });
+                    const content = buildSkillMarkdown({ name: s.name, description: s.description, trigger: s.trigger, tools: s.tools, body: s.body });
                     await this.fileService.write(uri, content);
                 }
-                this.logger.info(`[arschat-agents] seeded sample skills: ${SAMPLE_SKILLS.map(s => s.id).join(', ')}`);
+                this.logger.info(`[arschat-agents] seeded sample skills: ${skillsToSeed.map(s => s.id).join(', ')}`);
+            }
+            if ((skillsToSeed.some(s => s.id === UI_SKILL_ID) || existingSkillIds.has(UI_SKILL_ID)) && !uiSeedAlreadyConsidered) {
+                // Marker lets legacy profiles receive /ui once while respecting later user deletion of ui.md.
+                await this.fileService.write(markerUri, 'seeded\n');
             }
         } catch (e) {
             this.logger.warn(`[arschat-agents] failed to seed sample skills: ${e instanceof Error ? e.message : String(e)}`);
@@ -202,7 +237,7 @@ export class SkillService implements SkillCatalogProvider {
      * original input to show as ChatRequest.displayText. Returns undefined when
      * the input is not a recognized skill invocation.
      */
-    expandInput(input: string): { expanded: string; display: string } | undefined {
+    expandInput(input: string): { expanded: string; display: string; skill: { id: string; tools: string[] } } | undefined {
         if (!input.startsWith('/')) {
             return undefined;
         }
@@ -214,6 +249,6 @@ export class SkillService implements SkillCatalogProvider {
             return undefined;
         }
         const expanded = skill.body + (rest ? `\n\n---\n\n${rest}` : '');
-        return { expanded, display: input };
+        return { expanded, display: input, skill: { id: skill.id, tools: [...skill.tools] } };
     }
 }

@@ -21,6 +21,8 @@ export interface Skill {
     trigger: string;
     /** The instruction body (everything after the frontmatter) that gets expanded into the prompt. */
     body: string;
+    /** Tool ids that should be exposed while this skill is active. */
+    tools: string[];
     /** Absolute path to the source markdown file (for editing / reload). */
     filePath: string;
 }

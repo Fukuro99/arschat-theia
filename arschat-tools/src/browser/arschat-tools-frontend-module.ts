@@ -42,6 +42,8 @@ import { ContainerModule, interfaces, injectable, inject } from '@theia/core/sha
 import { CommandContribution, ILogger } from '@theia/core';
 import { FrontendApplicationContribution, RemoteConnectionProvider, ServiceConnectionProvider } from '@theia/core/lib/browser';
 import { ToolInvocationRegistry, bindToolProvider } from '@theia/ai-core/lib/common/tool-invocation-registry';
+import { ToolConfirmationManager } from '@theia/ai-chat/lib/browser/chat-tool-preference-bindings';
+import { ToolConfirmationMode } from '@theia/ai-chat/lib/common/chat-tool-preferences';
 import { ArschatChatAgent } from 'arschat-agents/lib/browser/arschat-chat-agent';
 import { ArschatFileToolsService } from './arschat-file-tools-service';
 import { ReadFileToolProvider } from './read-file-tool-provider';
@@ -50,12 +52,15 @@ import { EditFileToolProvider } from './edit-file-tool-provider';
 import { RunCommandToolProvider } from './run-command-tool-provider';
 import { WebSearchToolProvider } from './web-search-tool-provider';
 import { FetchPageToolProvider } from './fetch-page-tool-provider';
-import { ARSCHAT_ALL_TOOL_IDS } from '../common/tool-ids';
+import { RenderUiToolProvider } from './render-ui-tool-provider';
+import { ArschatUiInteractionService } from './arschat-ui-interaction-service';
+import { ARSCHAT_ALL_TOOL_IDS, ARSCHAT_UI_TOOL_IDS } from '../common/tool-ids';
 import { CommandRunnerService, commandRunnerServicePath } from '../common/command-runner-protocol';
 import { WebFetchService, webFetchServicePath } from '../common/web-fetch-protocol';
 import { ArschatMCPImportContribution } from './mcp-import-contribution';
 import { ArschatM5AutotestContribution } from './arschat-m5-autotest-contribution';
 import { ArschatM5LiveContribution } from './arschat-m5-live-contribution';
+import { shouldPromoteUiToolConfirmation } from './ui-tool-confirmation';
 
 @injectable()
 export class ArschatToolsRegistrationContribution implements FrontendApplicationContribution {
@@ -69,11 +74,23 @@ export class ArschatToolsRegistrationContribution implements FrontendApplication
     @inject(ILogger)
     protected readonly logger!: ILogger;
 
+    @inject(ToolConfirmationManager)
+    protected readonly confirmationManager!: ToolConfirmationManager;
+
     onStart(): void {
         // All ToolProviders (file tools + run_command + web_search/fetch_page) were
         // already collected into the registry by ToolInvocationRegistryImpl.init();
         // resolve exactly ours by id.
         const tools = this.toolRegistry.getFunctions(...ARSCHAT_ALL_TOOL_IDS);
+        const uiTools = this.toolRegistry.getFunctions(...ARSCHAT_UI_TOOL_IDS);
+        const confirmationSettings = this.confirmationManager.getAllConfirmationSettings();
+        for (const tool of uiTools) {
+            if (shouldPromoteUiToolConfirmation(tool.id, confirmationSettings)) {
+                // UI tools must bypass CONFIRM so their custom form can resolve the handler,
+                // but DISABLED is Theia's pre-handler denial path and is a user setting.
+                this.confirmationManager.setConfirmationMode(tool.id, ToolConfirmationMode.ALWAYS_ALLOW, tool);
+            }
+        }
         this.agent.setToolRequests(tools);
         const resolved = tools.map(t => t.id).join(', ') || '<none>';
         this.logger.info(`[arschat-tools] attached ${tools.length} tool(s) to ArsChat agent: ${resolved}`);
@@ -86,6 +103,7 @@ export class ArschatToolsRegistrationContribution implements FrontendApplication
 
 export function bindArschatTools(bind: interfaces.Bind): void {
     bind(ArschatFileToolsService).toSelf().inSingletonScope();
+    bind(ArschatUiInteractionService).toSelf().inSingletonScope();
 
     // run_command's backend runs over JSON-RPC: bind a proxy to the
     // CommandRunnerService symbol from the shared service path (RemoteConnectionProvider
@@ -110,6 +128,7 @@ export function bindArschatTools(bind: interfaces.Bind): void {
     bindToolProvider(RunCommandToolProvider, bind);
     bindToolProvider(WebSearchToolProvider, bind);
     bindToolProvider(FetchPageToolProvider, bind);
+    bindToolProvider(RenderUiToolProvider, bind);
 
     // Attach the resolved tools to the ArsChat agent on startup.
     bind(ArschatToolsRegistrationContribution).toSelf().inSingletonScope();
