@@ -1,23 +1,23 @@
 export const PERMISSION_DEFINITIONS = [
     {
         id: 'chat:read',
-        label: 'Read the current chat conversation'
+        label: '現在のチャットの会話内容を読み取る'
     },
     {
         id: 'chat:send',
-        label: 'Send messages to AI on your behalf'
+        label: 'あなたの代わりに AI へメッセージを送る'
     },
     {
         id: 'storage:read',
-        label: 'Read this extension storage'
+        label: 'この拡張専用の保存領域を読む'
     },
     {
         id: 'storage:write',
-        label: 'Write this extension storage'
+        label: 'この拡張専用の保存領域に書き込む'
     },
     {
         id: 'notification',
-        label: 'Show notifications'
+        label: '画面右下に通知を表示する'
     }
 ] as const;
 

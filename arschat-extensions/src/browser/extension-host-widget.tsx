@@ -4,6 +4,8 @@ import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
 import { DisposableCollection, MessageService } from '@theia/core';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ExtensionRegistryService, InstalledExtension } from './extension-registry-service';
+import { ExtensionPermissionDialog } from './extension-permission-dialog';
+import { ExtensionPermissionId } from '../common/extension-manifest';
 import { ExtensionBridgeRequestLimiter } from '../common/extension-bridge-limits';
 import {
     checkExtensionMethodPermission,
@@ -47,6 +49,7 @@ export class ExtensionHostWidget extends ReactWidget {
     protected blobUrl: string | undefined;
     protected loadError = '';
     protected iframeInitialLoadSeen = false;
+    protected loadingExtension = false;
     protected readonly toDispose = new DisposableCollection();
     protected readonly requestLimiter = new ExtensionBridgeRequestLimiter();
 
@@ -70,32 +73,57 @@ export class ExtensionHostWidget extends ReactWidget {
     }
 
     protected async loadExtension(): Promise<void> {
-        await this.registry.ready();
-        if (this.isDisposed) {
+        if (this.loadingExtension) {
             return;
         }
-        const extension = this.registry.getExtension(this.extensionName);
-        if (!extension) {
-            throw new Error(`Extension not installed: ${this.extensionName}`);
+        this.loadingExtension = true;
+        try {
+            await this.registry.ready();
+            if (this.isDisposed) {
+                return;
+            }
+            let extension = this.registry.getExtension(this.extensionName);
+            if (!extension) {
+                throw new Error(`Extension not installed: ${this.extensionName}`);
+            }
+            if (extension.source.kind === 'local') {
+                const updated = await this.registry.update(
+                    extension.name,
+                    request => this.confirmPermissions(request.manifest.displayName, request.newPermissions, 'update'),
+                    { notifyWhenUnchanged: false }
+                );
+                if (!updated) {
+                    this.extension = extension;
+                    this.title.label = extension.displayName;
+                    this.title.caption = extension.displayName;
+                    this.loadError = '追加権限が承認されなかったため、ローカル拡張を読み込みませんでした。';
+                    this.revokeBlobUrl();
+                    this.update();
+                    return;
+                }
+                extension = updated;
+            }
+            this.extension = extension;
+            this.title.label = extension.displayName;
+            this.title.caption = extension.displayName;
+            if (!extension.enabled) {
+                this.disableView();
+                return;
+            }
+            this.loadError = '';
+            this.revokeBlobUrl();
+            const html = await this.registry.getInstalledHtml(extension.name);
+            if (this.isDisposed) {
+                return;
+            }
+            this.iframeInitialLoadSeen = false;
+            this.blobUrl = URL.createObjectURL(new Blob([injectExtensionSandboxCsp(html)], { type: 'text/html' }));
+            window.removeEventListener('message', this.handleMessage);
+            window.addEventListener('message', this.handleMessage);
+            this.update();
+        } finally {
+            this.loadingExtension = false;
         }
-        this.extension = extension;
-        this.title.label = extension.displayName;
-        this.title.caption = extension.displayName;
-        if (!extension.enabled) {
-            this.disableView();
-            return;
-        }
-        this.loadError = '';
-        this.revokeBlobUrl();
-        const html = await this.registry.getInstalledHtml(extension.name);
-        if (this.isDisposed) {
-            return;
-        }
-        this.iframeInitialLoadSeen = false;
-        this.blobUrl = URL.createObjectURL(new Blob([injectExtensionSandboxCsp(html)], { type: 'text/html' }));
-        window.removeEventListener('message', this.handleMessage);
-        window.addEventListener('message', this.handleMessage);
-        this.update();
     }
 
     protected handleRegistryChange(): void {
@@ -111,7 +139,7 @@ export class ExtensionHostWidget extends ReactWidget {
             this.disableView();
             return;
         }
-        if (!this.blobUrl) {
+        if (!this.loadingExtension) {
             this.loadExtension().catch(e => {
                 this.loadError = e instanceof Error ? e.message : String(e);
                 this.update();
@@ -126,6 +154,19 @@ export class ExtensionHostWidget extends ReactWidget {
         this.loadError = 'Extension is disabled.';
         this.revokeBlobUrl();
         this.update();
+    }
+
+    protected async confirmPermissions(
+        displayName: string,
+        permissions: readonly ExtensionPermissionId[],
+        mode: 'update'
+    ): Promise<boolean> {
+        const result = await new ExtensionPermissionDialog({
+            extensionDisplayName: displayName,
+            permissions,
+            mode
+        }).open();
+        return result === true;
     }
 
     protected readonly handleMessage = (event: MessageEvent): void => {

@@ -10,6 +10,8 @@ import {
     parseManifestText,
     validateManifest
 } from '../common/extension-manifest';
+import { calculateNewPermissions, mergeGrantedPermissionsForManifest } from '../common/extension-permission-diff';
+import { ExtensionFetchService } from '../common/extension-fetch-protocol';
 
 export type ExtensionSource =
     | { readonly kind: 'github'; readonly url: string }
@@ -28,6 +30,24 @@ export interface InstalledExtension {
     readonly installedAt: string;
 }
 
+export interface ExtensionData {
+    readonly manifestText: string;
+    readonly manifest: ArschatExtensionManifest;
+    readonly html: string;
+}
+
+export interface ExtensionPermissionApprovalRequest {
+    readonly extension: InstalledExtension;
+    readonly manifest: ArschatExtensionManifest;
+    readonly newPermissions: ExtensionPermissionId[];
+}
+
+export type ExtensionPermissionApprover = (request: ExtensionPermissionApprovalRequest) => Promise<boolean>;
+
+export interface ExtensionUpdateOptions {
+    readonly notifyWhenUnchanged?: boolean;
+}
+
 interface RegistryFileShape {
     readonly extensions?: InstalledExtension[];
 }
@@ -43,6 +63,9 @@ export class ExtensionRegistryService {
 
     @inject(ILogger)
     protected readonly logger!: ILogger;
+
+    @inject(ExtensionFetchService)
+    protected readonly fetchService!: ExtensionFetchService;
 
     protected extensions: InstalledExtension[] = [];
     protected loadingPromise: Promise<void> | undefined;
@@ -72,7 +95,7 @@ export class ExtensionRegistryService {
     }
 
     async installFromLocalPath(localPath: string, grantedPermissions: readonly ExtensionPermissionId[]): Promise<InstalledExtension> {
-        const { manifestText, html } = await this.readLocalExtension(localPath);
+        const { manifestText, html } = await this.readLocalExtensionData(localPath);
         return this.installFromData(
             manifestText,
             html,
@@ -82,8 +105,12 @@ export class ExtensionRegistryService {
     }
 
     async readLocalManifest(localPath: string): Promise<ArschatExtensionManifest> {
-        const { manifestText } = await this.readLocalExtension(localPath);
-        return validateManifest(parseManifestText(manifestText));
+        const { manifest } = await this.readLocalExtensionData(localPath);
+        return manifest;
+    }
+
+    async readLocalExtensionData(localPath: string): Promise<ExtensionData> {
+        return this.readLocalExtension(localPath);
     }
 
     async installFromData(
@@ -95,6 +122,7 @@ export class ExtensionRegistryService {
         await this.ready();
         const manifest = validateManifest(parseManifestText(manifestText));
         this.validateGrantedPermissions(manifest, grantedPermissions);
+        const normalizedGrantedPermissions = mergeGrantedPermissionsForManifest(manifest.permissions, grantedPermissions, []);
         const existing = this.getExtension(manifest.name);
         const installedAt = existing?.installedAt ?? new Date().toISOString();
         const entry: InstalledExtension = {
@@ -104,7 +132,7 @@ export class ExtensionRegistryService {
             description: manifest.description,
             source,
             manifestPermissions: [...manifest.permissions],
-            grantedPermissions: [...grantedPermissions],
+            grantedPermissions: normalizedGrantedPermissions,
             enabled: existing?.enabled ?? true,
             installedAt
         };
@@ -146,17 +174,82 @@ export class ExtensionRegistryService {
         }
     }
 
+    async update(
+        name: string,
+        approveNewPermissions?: ExtensionPermissionApprover,
+        options: ExtensionUpdateOptions = {}
+    ): Promise<InstalledExtension | undefined> {
+        await this.ready();
+        const existing = this.getExtension(name);
+        if (!existing) {
+            throw new Error(`Extension not installed: ${name}`);
+        }
+        if (existing.source.kind === 'autotest') {
+            throw new Error('Autotest extensions cannot be updated');
+        }
+
+        const data = await this.fetchSourceData(existing.source);
+        if (data.manifest.name !== existing.name) {
+            throw new Error(`Extension update changed manifest name from '${existing.name}' to '${data.manifest.name}'`);
+        }
+
+        const newPermissions = calculateNewPermissions(data.manifest.permissions, existing.grantedPermissions);
+        if (newPermissions.length > 0) {
+            if (!approveNewPermissions) {
+                throw new Error(`Extension update requires approval for new permissions: ${newPermissions.join(', ')}`);
+            }
+            const approved = await approveNewPermissions({
+                extension: existing,
+                manifest: data.manifest,
+                newPermissions
+            });
+            if (!approved) {
+                return undefined;
+            }
+        }
+
+        const grantedPermissions = mergeGrantedPermissionsForManifest(
+            data.manifest.permissions,
+            existing.grantedPermissions,
+            newPermissions
+        );
+        const updated: InstalledExtension = {
+            ...existing,
+            displayName: data.manifest.displayName,
+            version: data.manifest.version,
+            description: data.manifest.description,
+            manifestPermissions: [...data.manifest.permissions],
+            grantedPermissions
+        };
+
+        const changed = !this.sameExtension(existing, updated);
+        if (changed) {
+            this.extensions = [...this.extensions.filter(ext => ext.name !== updated.name), updated]
+                .sort((a, b) => a.displayName.localeCompare(b.displayName));
+            await this.persist();
+        }
+        if (existing.source.kind === 'github') {
+            // Persist the approved permissions before replacing HTML. If the HTML
+            // write then fails, the old HTML runs with the new (possibly narrower)
+            // grants, which is fail-safe; the reverse could leave new HTML running
+            // with stale, broader permissions.
+            await this.writeExtensionFiles(data.manifest.name, data.html);
+        }
+        if (changed || options.notifyWhenUnchanged !== false) {
+            this.onDidChangeEmitter.fire();
+        }
+        return this.getExtension(updated.name);
+    }
+
     async getInstalledHtml(name: string): Promise<string> {
         const extension = this.getExtension(name);
         if (extension?.source.kind === 'local') {
-            const { manifestText, html } = await this.readLocalExtension(extension.source.path);
-            const manifest = validateManifest(parseManifestText(manifestText));
+            const { manifest, html } = await this.readLocalExtensionData(extension.source.path);
             if (manifest.name !== extension.name) {
                 throw new Error(`Local extension manifest name changed from '${extension.name}' to '${manifest.name}'`);
             }
             const newlyDeclared = manifest.permissions.filter(permission => !extension.grantedPermissions.includes(permission));
             if (newlyDeclared.length > 0) {
-                // TODO(ms-14 Phase 2): replace this hard failure with the incremental permission approval dialog.
                 throw new Error(`Local extension requests unapproved permissions: ${newlyDeclared.join(', ')}`);
             }
             return html;
@@ -176,7 +269,7 @@ export class ExtensionRegistryService {
         await this.writeStorage(name, store);
     }
 
-    protected async readLocalExtension(localPath: string): Promise<{ manifestText: string; html: string }> {
+    protected async readLocalExtension(localPath: string): Promise<ExtensionData> {
         const inputUri = this.toFileUri(localPath);
         const stat = await this.fileService.resolve(inputUri);
         const manifestUri = stat.isDirectory ? inputUri.resolve('arschat-extension.json') : inputUri;
@@ -184,7 +277,22 @@ export class ExtensionRegistryService {
         const manifest = validateManifest(parseManifestText(manifestText));
         const entryUri = manifestUri.parent.resolve(manifest.entry);
         const html = (await this.fileService.read(entryUri)).value;
-        return { manifestText, html };
+        return { manifestText, manifest, html };
+    }
+
+    protected async fetchSourceData(source: ExtensionSource): Promise<ExtensionData> {
+        if (source.kind === 'github') {
+            const fetched = await this.fetchService.fetchFromGitHub({ url: source.url });
+            return {
+                manifestText: fetched.manifestText,
+                manifest: fetched.manifest,
+                html: fetched.html
+            };
+        }
+        if (source.kind === 'local') {
+            return this.readLocalExtensionData(source.path);
+        }
+        throw new Error('Autotest extensions do not have an update source');
     }
 
     protected toFileUri(pathOrUri: string): URI {
@@ -262,6 +370,10 @@ export class ExtensionRegistryService {
             await this.fileService.createFolder(dir);
         }
         await this.fileService.write(dir.resolve('main.html'), html);
+    }
+
+    protected sameExtension(a: InstalledExtension, b: InstalledExtension): boolean {
+        return JSON.stringify(a) === JSON.stringify(b);
     }
 
     protected async readStorage(name: string): Promise<Record<string, unknown>> {

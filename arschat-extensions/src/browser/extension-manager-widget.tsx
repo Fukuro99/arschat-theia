@@ -5,8 +5,10 @@ import { ApplicationShell, WidgetManager } from '@theia/core/lib/browser';
 import { ConfirmDialog } from '@theia/core/lib/browser/dialogs';
 import { DisposableCollection } from '@theia/core';
 import { ExtensionHostWidget } from './extension-host-widget';
-import { ExtensionRegistryService, InstalledExtension } from './extension-registry-service';
-import { permissionLabel } from '../common/extension-manifest';
+import { ExtensionPermissionApprovalRequest, ExtensionRegistryService, InstalledExtension } from './extension-registry-service';
+import { ExtensionPermissionId, permissionLabel } from '../common/extension-manifest';
+import { ExtensionFetchService } from '../common/extension-fetch-protocol';
+import { ExtensionPermissionDialog } from './extension-permission-dialog';
 
 @injectable()
 export class ExtensionManagerWidget extends ReactWidget {
@@ -23,8 +25,12 @@ export class ExtensionManagerWidget extends ReactWidget {
     @inject(ApplicationShell)
     protected readonly shell!: ApplicationShell;
 
+    @inject(ExtensionFetchService)
+    protected readonly fetchService!: ExtensionFetchService;
+
     protected extensions: InstalledExtension[] = [];
     protected localPath = '';
+    protected githubUrl = '';
     protected error = '';
     protected busy = false;
 
@@ -62,10 +68,45 @@ export class ExtensionManagerWidget extends ReactWidget {
         this.error = '';
         this.update();
         try {
-            const manifest = await this.registry.readLocalManifest(path);
-            // TODO(ms-14 Phase 2): replace this explicit temporary grant with the permission approval dialog.
-            await this.registry.installFromLocalPath(path, manifest.permissions);
-            this.localPath = '';
+            const data = await this.registry.readLocalExtensionData(path);
+            const approved = await this.confirmPermissions(data.manifest.displayName, data.manifest.permissions, 'install');
+            if (approved) {
+                await this.registry.installFromData(
+                    data.manifestText,
+                    data.html,
+                    { kind: 'local', path },
+                    data.manifest.permissions
+                );
+                this.localPath = '';
+            }
+        } catch (e) {
+            this.error = e instanceof Error ? e.message : String(e);
+        } finally {
+            this.busy = false;
+            await this.refresh();
+        }
+    }
+
+    protected async installGitHub(): Promise<void> {
+        const url = this.githubUrl.trim();
+        if (!url || this.busy) {
+            return;
+        }
+        this.busy = true;
+        this.error = '';
+        this.update();
+        try {
+            const data = await this.fetchService.fetchFromGitHub({ url });
+            const approved = await this.confirmPermissions(data.manifest.displayName, data.manifest.permissions, 'install');
+            if (approved) {
+                await this.registry.installFromData(
+                    data.manifestText,
+                    data.html,
+                    { kind: 'github', url },
+                    data.manifest.permissions
+                );
+                this.githubUrl = '';
+            }
         } catch (e) {
             this.error = e instanceof Error ? e.message : String(e);
         } finally {
@@ -89,14 +130,48 @@ export class ExtensionManagerWidget extends ReactWidget {
         await this.registry.setEnabled(name, enabled);
     }
 
+    protected async updateExtension(name: string): Promise<void> {
+        if (this.busy) {
+            return;
+        }
+        this.busy = true;
+        this.error = '';
+        this.update();
+        try {
+            await this.registry.update(name, request => this.confirmUpdatePermissions(request));
+        } catch (e) {
+            this.error = e instanceof Error ? e.message : String(e);
+        } finally {
+            this.busy = false;
+            await this.refresh();
+        }
+    }
+
     protected async uninstall(name: string, displayName: string): Promise<void> {
         const confirmed = await new ConfirmDialog({
-            title: 'Uninstall ArsChat Extension',
-            msg: `Uninstall ${displayName}?`
+            title: 'ArsChat 拡張を削除',
+            msg: `${displayName} を削除しますか？`
         }).open();
         if (confirmed) {
             await this.registry.uninstall(name);
         }
+    }
+
+    protected confirmUpdatePermissions(request: ExtensionPermissionApprovalRequest): Promise<boolean> {
+        return this.confirmPermissions(request.manifest.displayName, request.newPermissions, 'update');
+    }
+
+    protected async confirmPermissions(
+        displayName: string,
+        permissions: readonly ExtensionPermissionId[],
+        mode: 'install' | 'update'
+    ): Promise<boolean> {
+        const result = await new ExtensionPermissionDialog({
+            extensionDisplayName: displayName,
+            permissions,
+            mode
+        }).open();
+        return result === true;
     }
 
     render(): React.ReactElement {
@@ -104,21 +179,34 @@ export class ExtensionManagerWidget extends ReactWidget {
             <div className='arschat-extension-manager-root'>
                 <div className='arschat-extension-install'>
                     <input
-                        className='theia-input arschat-extension-local-path'
+                        className='theia-input arschat-extension-source-input'
+                        value={this.githubUrl}
+                        placeholder='https://github.com/owner/repo'
+                        onChange={e => { this.githubUrl = e.target.value; this.update(); }}
+                    />
+                    <button
+                        className='theia-button arschat-extension-install-button'
+                        disabled={this.busy || !this.githubUrl.trim()}
+                        onClick={() => this.installGitHub()}
+                    >GitHub から設置</button>
+                </div>
+                <div className='arschat-extension-install'>
+                    <input
+                        className='theia-input arschat-extension-source-input'
                         value={this.localPath}
-                        placeholder='Local extension folder or arschat-extension.json'
+                        placeholder='ローカル拡張フォルダーまたは arschat-extension.json'
                         onChange={e => { this.localPath = e.target.value; this.update(); }}
                     />
                     <button
                         className='theia-button arschat-extension-install-button'
                         disabled={this.busy || !this.localPath.trim()}
                         onClick={() => this.installLocal()}
-                    >Install</button>
+                    >ローカル設置</button>
                 </div>
                 {this.error && <div className='arschat-extension-error'>{this.error}</div>}
                 <div className='arschat-extension-list'>
                     {this.extensions.length === 0 && (
-                        <div className='arschat-extension-empty'>No extensions installed.</div>
+                        <div className='arschat-extension-empty'>設置済みの拡張はありません。</div>
                     )}
                     {this.extensions.map(ext => this.renderExtension(ext))}
                 </div>
@@ -138,24 +226,35 @@ export class ExtensionManagerWidget extends ReactWidget {
                     {ext.description && <div className='arschat-extension-description'>{ext.description}</div>}
                     <div className='arschat-extension-permissions'>
                         {ext.grantedPermissions.length === 0
-                            ? 'No permissions granted'
+                            ? '承認済み権限なし'
                             : ext.grantedPermissions.map(permissionLabel).join(', ')}
                     </div>
                 </div>
                 <div className='arschat-extension-actions'>
                     <button
                         className='theia-button secondary'
-                        disabled={!ext.enabled}
+                        disabled={this.busy || !ext.enabled}
                         onClick={() => this.openExtension(ext.name)}
-                    >Open</button>
+                    >開く</button>
+                    <label className='arschat-extension-enabled-toggle'>
+                        <input
+                            type='checkbox'
+                            checked={ext.enabled}
+                            disabled={this.busy}
+                            onChange={e => this.setEnabled(ext.name, e.currentTarget.checked)}
+                        />
+                        <span>{ext.enabled ? '有効' : '無効'}</span>
+                    </label>
                     <button
                         className='theia-button secondary'
-                        onClick={() => this.setEnabled(ext.name, !ext.enabled)}
-                    >{ext.enabled ? 'Disable' : 'Enable'}</button>
+                        disabled={this.busy || ext.source.kind === 'autotest'}
+                        onClick={() => this.updateExtension(ext.name)}
+                    >更新</button>
                     <button
                         className='theia-button secondary'
+                        disabled={this.busy}
                         onClick={() => this.uninstall(ext.name, ext.displayName)}
-                    >Uninstall</button>
+                    >削除</button>
                 </div>
             </div>
         );
