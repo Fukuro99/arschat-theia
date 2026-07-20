@@ -25,6 +25,7 @@
     "@theia/workspace": "1.71.2",
     "arschat-agents": "0.0.1",
     "arschat-chat": "0.0.1",
+    "arschat-extensions": "0.0.1",
     "arschat-providers": "0.0.1",
     "arschat-tools": "0.0.1"
   },

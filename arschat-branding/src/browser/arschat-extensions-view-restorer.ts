@@ -41,7 +41,8 @@ export const RESTORED_SIDE_VIEWS: readonly RestoredSideView[] = [
     // through the view-container factory `search-view-container`.
     { id: SEARCH_VIEW_CONTAINER_ID, area: 'left' },
     { id: OUTLINE_WIDGET_FACTORY_ID, area: 'right' },
-    { id: VSXExtensionsViewContainer.ID, area: 'left' }
+    { id: VSXExtensionsViewContainer.ID, area: 'left' },
+    { id: 'arschat-extensions:manager', area: 'left' }
 ];
 
 @injectable()

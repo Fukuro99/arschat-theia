@@ -1,0 +1,41 @@
+{
+  "name": "arschat-extensions",
+  "keywords": [
+    "theia-extension"
+  ],
+  "version": "0.0.1",
+  "description": "ArsChat sandboxed HTML extension host and local extension manager.",
+  "author": "Fukuro99",
+  "license": "MIT",
+  "files": [
+    "lib",
+    "src"
+  ],
+  "dependencies": {
+    "@theia/ai-chat": "1.71.2",
+    "@theia/core": "1.71.2",
+    "@theia/filesystem": "1.71.2"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.0",
+    "typescript": "~5.4.5",
+    "@types/jest": "^29.5.0",
+    "jest": "^29.5.0",
+    "jest-environment-jsdom": "^29.5.0",
+    "ts-node": "^10.9.1",
+    "ts-jest": "^29.1.0"
+  },
+  "scripts": {
+    "prepare": "npm run clean && npm run build",
+    "clean": "rimraf lib",
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "jest --config configs/jest.config.ts"
+  },
+  "theiaExtensions": [
+    {
+      "frontend": "lib/browser/arschat-extensions-frontend-module",
+      "backend": "lib/node/arschat-extensions-backend-module"
+    }
+  ]
+}

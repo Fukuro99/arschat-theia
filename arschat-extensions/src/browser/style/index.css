@@ -1,0 +1,115 @@
+.arschat-extension-manager-widget {
+    background: var(--theia-sideBar-background);
+    color: var(--theia-sideBar-foreground, var(--theia-foreground));
+}
+
+.arschat-extension-manager-root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.arschat-extension-install {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 6px;
+    padding: 8px;
+    border-bottom: 1px solid var(--theia-editorGroup-border, #444);
+}
+
+.arschat-extension-local-path {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 12px;
+}
+
+.arschat-extension-install-button {
+    flex: 0 0 auto;
+    font-size: 12px;
+}
+
+.arschat-extension-error {
+    flex: 0 0 auto;
+    padding: 8px;
+    color: var(--theia-errorForeground, #f14c4c);
+    font-size: 12px;
+    border-bottom: 1px solid var(--theia-editorGroup-border, #444);
+}
+
+.arschat-extension-list {
+    flex: 1 1 auto;
+    overflow-y: auto;
+}
+
+.arschat-extension-empty {
+    padding: 16px;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+    text-align: center;
+}
+
+.arschat-extension-item {
+    padding: 10px;
+    border-bottom: 1px solid var(--theia-editorGroup-border, rgba(255, 255, 255, 0.08));
+}
+
+.arschat-extension-item.disabled {
+    opacity: 0.65;
+}
+
+.arschat-extension-title-row,
+.arschat-extension-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.arschat-extension-name {
+    font-weight: 600;
+    font-size: 13px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.arschat-extension-version,
+.arschat-extension-id,
+.arschat-extension-description,
+.arschat-extension-permissions {
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+    margin-top: 3px;
+    word-break: break-word;
+}
+
+.arschat-extension-actions {
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+
+.arschat-extension-actions .theia-button {
+    margin: 0;
+    font-size: 11px;
+    padding: 2px 8px;
+}
+
+.arschat-extension-host-root {
+    width: 100%;
+    height: 100%;
+    background: #fff;
+}
+
+.arschat-extension-host-root iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    display: block;
+    background: #fff;
+}
+
+.arschat-extension-host-error,
+.arschat-extension-host-loading {
+    padding: 16px;
+    color: var(--theia-foreground);
+}

@@ -1,0 +1,8 @@
+{
+  "name": "arschat-ext-hello",
+  "displayName": "Hello Sample",
+  "version": "0.1.0",
+  "description": "Sample sandboxed ArsChat extension",
+  "permissions": ["chat:send", "storage:read", "storage:write"],
+  "entry": "main.html"
+}

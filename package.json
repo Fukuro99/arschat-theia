@@ -24,6 +24,7 @@
     "arschat-chat",
     "arschat-agents",
     "arschat-tools",
+    "arschat-extensions",
     "browser-app",
     "electron-app"
   ],
