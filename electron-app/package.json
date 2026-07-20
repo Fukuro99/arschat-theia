@@ -28,6 +28,7 @@
     "arschat-agents": "0.0.1",
     "arschat-branding": "0.0.1",
     "arschat-chat": "0.0.1",
+    "arschat-extensions": "0.0.1",
     "arschat-providers": "0.0.1",
     "arschat-tools": "0.0.1"
   },

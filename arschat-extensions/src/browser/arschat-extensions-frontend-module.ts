@@ -10,6 +10,7 @@ import { ExtensionRegistryService } from './extension-registry-service';
 import { ExtensionManagerWidget } from './extension-manager-widget';
 import { ExtensionManagerContribution } from './extension-manager-contribution';
 import { ExtensionHostWidget } from './extension-host-widget';
+import { ArschatM14AutotestContribution } from './arschat-m14-autotest-contribution';
 import {
     arschatExtensionFetchServicePath,
     ExtensionFetchService
@@ -42,6 +43,9 @@ export function bindArschatExtensions(bind: interfaces.Bind): void {
             return widget;
         }
     })).inSingletonScope();
+
+    bind(ArschatM14AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM14AutotestContribution);
 }
 
 export default new ContainerModule(bind => {

@@ -61,14 +61,20 @@ export class ArschatSideViewRestorer implements FrontendApplicationContribution 
     async restoreConfiguredSideViews(): Promise<string[]> {
         const restored: string[] = [];
         for (const view of RESTORED_SIDE_VIEWS) {
-            if (this.isDocked(view)) {
-                console.log(`[arschat-side-views] ${view.id} already docked on the ${view.area}`);
-                continue;
+            try {
+                if (this.isDocked(view)) {
+                    console.log(`[arschat-side-views] ${view.id} already docked on the ${view.area}`);
+                    continue;
+                }
+                const widget = await this.widgetManager.getOrCreateWidget(view.id);
+                await this.shell.addWidget(widget, { area: view.area });
+                restored.push(widget.id);
+                console.log(`[arschat-side-views] restored ${widget.id} into the ${view.area} side panel`);
+            } catch (error) {
+                // Keep later stock view restorations alive when an app target omits
+                // an optional view contribution/factory from its dependency graph.
+                console.warn(`[arschat-side-views] failed to restore ${view.id}; continuing`, error);
             }
-            const widget = await this.widgetManager.getOrCreateWidget(view.id);
-            await this.shell.addWidget(widget, { area: view.area });
-            restored.push(widget.id);
-            console.log(`[arschat-side-views] restored ${widget.id} into the ${view.area} side panel`);
         }
         return restored;
     }
