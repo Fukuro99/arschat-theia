@@ -73,6 +73,50 @@ beforeEach(() => {
 });
 afterEach(() => { jest.restoreAllMocks(); });
 
+function deferred() {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+}
+
+describe('secret migration startup', () => {
+    it('lets later contributions start before preferences are ready, then migrates once', async () => {
+        const f = fixture();
+        const preferencesReady = deferred();
+        f.preferences.ready = preferencesReady.promise;
+        f.put(AP.API_KEY_PREF, 'legacy-global');
+        await f.secrets.ready();
+
+        expect(f.migration.onStart()).toBeUndefined();
+        expect(f.migration.onStart()).toBeUndefined();
+        await Promise.resolve();
+        expect(f.keyStore.setPassword).not.toHaveBeenCalled();
+        expect(f.preferences.set).not.toHaveBeenCalled();
+
+        preferencesReady.resolve(); // A later frontend contribution can now resolve this.
+        await f.migration.ready();
+        expect(f.vault.get('anthropic')).toBe('legacy-global');
+        expect(f.preferences.get(AP.API_KEY_PREF)).toBeUndefined();
+        expect(f.keyStore.setPassword).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles preference readiness failures without logging exception contents', async () => {
+        const f = fixture();
+        const preferencesReady = deferred();
+        f.preferences.ready = preferencesReady.promise;
+        await f.secrets.ready();
+        f.migration.onStart();
+        await Promise.resolve();
+        preferencesReady.reject(new Error('private-key-in-error'));
+        await f.migration.ready();
+        expect(f.logger.warn.mock.calls).toEqual([
+            ['[arschat-secrets] migration failed; plaintext preferences retained']
+        ]);
+        expect(f.preferences.set).not.toHaveBeenCalled();
+    });
+});
+
 describe('M9 secret store (Map-backed KeyStoreService only)', () => {
     it('preloads once via keys/getPassword, then emits account-only events after verified set/delete', async () => {
         const f = fixture([['anthropic', 'saved']]);
@@ -270,6 +314,49 @@ describe.each([
         return { c, manager, aiChanges };
     }
 
+    it('returns immediately while preferences are pending, then migrates and injects once', async () => {
+        const f = fixture();
+        const preferencesReady = deferred();
+        f.preferences.ready = preferencesReady.promise;
+        f.put(prefs.API_KEY_PREF, 'legacy-global');
+        f.put(prefs.CUSTOM_ENDPOINTS_PREF, [{ id: 'x', model: 'x', url: 'http://localhost/v1', apiKey: 'legacy-custom' }]);
+        const { c, manager } = contribution(f);
+
+        expect(c.onStart()).toBeUndefined();
+        expect(c.onStart()).toBeUndefined();
+        await Promise.resolve();
+        expect(manager.setApiKey).not.toHaveBeenCalled();
+        expect(f.keyStore.setPassword).not.toHaveBeenCalled();
+
+        preferencesReady.resolve();
+        await c.ready();
+        expect(f.vault.get(account)).toBe('legacy-global');
+        expect(f.preferences.get(prefs.API_KEY_PREF)).toBeUndefined();
+        expect(manager.setApiKey).toHaveBeenCalledTimes(1);
+        expect(manager.setApiKey).toHaveBeenCalledWith('legacy-global');
+        expect(manager.createOrUpdateLanguageModels).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'x', apiKey: 'legacy-custom' }));
+        c.onStop();
+    });
+
+    it.each(['preferences', 'migration'])('catches %s readiness rejection without logging exception contents', async dependency => {
+        const f = fixture();
+        const ready = deferred();
+        if (dependency === 'preferences') {
+            f.preferences.ready = ready.promise;
+        } else {
+            jest.spyOn(f.migration, 'ready').mockReturnValue(ready.promise);
+        }
+        const { c, manager } = contribution(f);
+        c.onStart();
+        await Promise.resolve();
+        ready.reject(new Error('private-key-in-error'));
+        await c.ready();
+        expect(console.warn).toHaveBeenCalledWith(`[arschat-secrets] ${account} key injection failed`);
+        expect(JSON.stringify((console.warn as jest.Mock).mock.calls)).not.toContain('private-key-in-error');
+        expect(manager.setApiKey).not.toHaveBeenCalled();
+        c.onStop();
+    });
+
     it.each(['unavailable', 'status RPC failure'])('injects existing vault keys after preload when persistence is %s', async failure => {
         const f = fixture([[account, 'existing-global'], ['custom:x', 'existing-custom']], false);
         if (failure === 'status RPC failure') {
@@ -280,7 +367,8 @@ describe.each([
         const read = new Promise<void>(resolve => { finishRead = resolve; });
         f.keyStore.keys.mockImplementation(async () => { await read; return [...f.vault.keys()]; });
         const { c, manager } = contribution(f);
-        const started = c.onStart();
+        c.onStart();
+        const started = c.ready();
         await waitFor(() => expect(f.keyStore.keys).toHaveBeenCalled());
         expect(manager.setApiKey).not.toHaveBeenCalled();
         finishRead();
@@ -297,7 +385,8 @@ describe.each([
         f.put(prefs.CUSTOM_ENDPOINTS_PREF, [{ id: 'x', model: 'x', url: 'http://localhost/v1' }]);
         f.keyStore.keys.mockRejectedValue(new Error('unavailable'));
         const { c, manager } = contribution(f);
-        await c.onStart();
+        c.onStart();
+        await c.ready();
         expect(manager.setApiKey).toHaveBeenLastCalledWith(undefined);
         f.keyStore.keys.mockImplementation(async () => [...f.vault.keys()]);
         await f.secrets.ready();
@@ -316,7 +405,8 @@ describe.each([
             f.vault.set(name, value);
         });
         const { c, manager } = contribution(f);
-        const started = c.onStart();
+        c.onStart();
+        const started = c.ready();
         await waitFor(() => expect(f.keyStore.setPassword).toHaveBeenCalled());
         expect(manager.setApiKey).not.toHaveBeenCalled();
         finishWrite();
@@ -344,7 +434,8 @@ describe.each([
         const f = fixture([[account, 'global'], ['custom:x', 'custom']]);
         f.put(prefs.CUSTOM_ENDPOINTS_PREF, [{ id: 'x', model: 'x', url: 'http://localhost/v1', apiKey: true }]);
         const { c, manager } = contribution(f);
-        await c.onStart();
+        c.onStart();
+        await c.ready();
         expect(manager.setApiKey).toHaveBeenLastCalledWith('global');
         expect(manager.createOrUpdateLanguageModels).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'x', apiKey: true }));
         c.onStop();
@@ -353,7 +444,8 @@ describe.each([
     it('injects UI-saved keys immediately after removing old plaintext in both scopes', async () => {
         const f = fixture();
         const { c, manager } = contribution(f);
-        await c.onStart();
+        c.onStart();
+        await c.ready();
         // Add legacy values after startup so this specifically exercises UI cleanup.
         for (const scope of [PreferenceScope.User, PreferenceScope.Workspace]) {
             f.put(prefs.API_KEY_PREF, 'old-global', scope);
@@ -376,7 +468,9 @@ describe.each([
         f.put(prefs.MODELS_PREF, ['old']);
         f.put(prefs.CUSTOM_ENDPOINTS_PREF, [{ id: 'x', model: 'x', url: 'http://localhost/v1' }]);
         const { c, manager, aiChanges } = contribution(f);
-        await Promise.all([c.onStart(), c.onStart()]);
+        c.onStart();
+        c.onStart();
+        await c.ready();
         expect(manager.setApiKey).toHaveBeenCalledTimes(1);
         expect(manager.setApiKey).toHaveBeenLastCalledWith(undefined);
         await f.secrets.set(account, 'global');
@@ -511,6 +605,21 @@ describe('M9 model discovery and explicit UI edits', () => {
 });
 
 describe('M9 opt-in autotest with mocked credentials', () => {
+    it('returns with opt-in enabled while migration waits for preferences', async () => {
+        const f = fixture([['anthropic', 'keep']]);
+        const preferencesReady = deferred();
+        f.preferences.ready = preferencesReady.promise;
+        const c = new ArschatM9AutotestContribution();
+        Object.assign(c, { env: { getValue: async () => ({ value: '1' }) }, secrets: f.secrets, preferences: f.preferences,
+            migration: f.migration, keychainStatus: f.keychainStatus, anthropic: { ready: async () => undefined } });
+        const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        await c.onStart();
+        expect(f.keyStore.setPassword).not.toHaveBeenCalled();
+        preferencesReady.resolve();
+        await waitFor(() => expect(log).toHaveBeenLastCalledWith('[M9][autotest] SUMMARY 2 PASS / 0 FAIL / 1 SKIP'));
+        expect([...f.vault]).toEqual([['anthropic', 'keep']]);
+    });
+
     it('does nothing without backend opt-in', async () => {
         const c = new ArschatM9AutotestContribution();
         const f = fixture();
@@ -524,13 +633,13 @@ describe('M9 opt-in autotest with mocked credentials', () => {
         f.put(OP.CUSTOM_ENDPOINTS_PREF, [{ id: 'keep', model: 'keep' }]);
         const c = new ArschatM9AutotestContribution();
         Object.assign(c, { env: { getValue: async () => ({ value: '1' }) }, secrets: f.secrets, preferences: f.preferences,
-            migration: f.migration, keychainStatus: f.keychainStatus, anthropic: { onStart: async () => undefined, apiKeyInitialized: true } });
+            migration: f.migration, keychainStatus: f.keychainStatus, anthropic: { ready: async () => undefined, apiKeyInitialized: true } });
         const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
         await c.onStart();
         expect(log).toHaveBeenCalledWith(`[M9][autotest] isPersistent: ${persistent}`);
-        expect(log).toHaveBeenLastCalledWith(persistent
+        await waitFor(() => expect(log).toHaveBeenLastCalledWith(persistent
             ? '[M9][autotest] SUMMARY 3 PASS / 0 FAIL / 0 SKIP'
-            : '[M9][autotest] SUMMARY 2 PASS / 0 FAIL / 1 SKIP');
+            : '[M9][autotest] SUMMARY 2 PASS / 0 FAIL / 1 SKIP'));
         if (!persistent) { expect(f.keyStore.setPassword).not.toHaveBeenCalled(); }
         expect([...f.vault]).toEqual([['openai', 'keep']]);
         expect(f.preferences.get(OP.CUSTOM_ENDPOINTS_PREF)).toEqual([{ id: 'keep', model: 'keep' }]);
@@ -565,8 +674,12 @@ it('rebinds real Theia frontend modules without duplicate aliases and uses injec
     expect(contributions.filter(c => c instanceof AnthropicFrontendApplicationContribution)).toEqual([anthropic]);
     expect(contributions.filter(c => c instanceof OpenAiFrontendApplicationContribution)).toEqual([openai]);
     expect(container.get(AnthropicFrontendApplicationContribution)).toBe(anthropic);
-    await anthropic.onStart();
-    await openai.onStart();
+    anthropic.onStart();
+    openai.onStart();
+    await Promise.all([
+        (anthropic as ArschatAnthropicFrontendContribution).ready(),
+        (openai as ArschatOpenAiFrontendContribution).ready()
+    ]);
     expect(manager.setApiKey.mock.calls).toEqual([['cached'], ['cached-openai']]);
     expect(f.keyStore.keys).toHaveBeenCalledTimes(1);
     (anthropic as ArschatAnthropicFrontendContribution).onStop();

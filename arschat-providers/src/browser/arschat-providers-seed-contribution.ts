@@ -34,7 +34,14 @@ export class ArschatProvidersSeedContribution implements FrontendApplicationCont
     @inject(ILogger)
     protected readonly logger!: ILogger;
 
-    async onStart(): Promise<void> {
+    onStart(): void {
+        // Preferences become ready only after later frontend contributions have started.
+        void this.seed().catch(() => {
+            this.logger.warn('[arschat-providers] failed to seed custom endpoints');
+        });
+    }
+
+    private async seed(): Promise<void> {
         await this.preferenceService.ready;
         const existing = this.preferenceService.get<CustomOpenAiModelEntry[]>(OPENAI_CUSTOM_ENDPOINTS_PREF, []) ?? [];
         const byId = new Set(existing.map(e => (typeof e.id === 'string' ? e.id : e.model)));
@@ -57,11 +64,7 @@ export class ArschatProvidersSeedContribution implements FrontendApplicationCont
         }
 
         const merged = [...existing, ...seeds];
-        try {
-            await this.preferenceService.set(OPENAI_CUSTOM_ENDPOINTS_PREF, merged, PreferenceScope.User);
-            this.logger.info(`[arschat-providers] seeded custom OpenAI endpoints: ${seeds.map(s => s.id).join(', ')}`);
-        } catch (e: unknown) {
-            this.logger.warn(`[arschat-providers] failed to seed custom endpoints: ${e instanceof Error ? e.message : String(e)}`);
-        }
+        await this.preferenceService.set(OPENAI_CUSTOM_ENDPOINTS_PREF, merged, PreferenceScope.User);
+        this.logger.info(`[arschat-providers] seeded custom OpenAI endpoints: ${seeds.map(s => s.id).join(', ')}`);
     }
 }

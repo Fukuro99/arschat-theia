@@ -23,8 +23,16 @@ export class ArschatAnthropicFrontendContribution extends AnthropicFrontendAppli
     private readonly subscriptions = new DisposableCollection();
     private startup?: Promise<void>;
 
-    override onStart(): Promise<void> {
-        return this.startup ?? (this.startup = this.start());
+    override onStart(): void {
+        // Do not block later contributions that resolve PreferenceService.ready.
+        void this.ready();
+    }
+
+    /** Await initialization only outside the frontend startup contribution chain. */
+    ready(): Promise<void> {
+        return this.startup ?? (this.startup = this.start().catch(() => {
+            console.warn('[arschat-secrets] anthropic key injection failed');
+        }));
     }
 
     private async start(): Promise<void> {
@@ -103,8 +111,16 @@ export class ArschatOpenAiFrontendContribution extends OpenAiFrontendApplication
     private readonly subscriptions = new DisposableCollection();
     private startup?: Promise<void>;
 
-    override onStart(): Promise<void> {
-        return this.startup ?? (this.startup = this.start());
+    override onStart(): void {
+        // Do not block later contributions that resolve PreferenceService.ready.
+        void this.ready();
+    }
+
+    /** Await initialization only outside the frontend startup contribution chain. */
+    ready(): Promise<void> {
+        return this.startup ?? (this.startup = this.start().catch(() => {
+            console.warn('[arschat-secrets] openai key injection failed');
+        }));
     }
 
     private async start(): Promise<void> {

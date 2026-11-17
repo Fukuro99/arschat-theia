@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { waitFor } from '@testing-library/react';
 import { PreferenceScope } from '@theia/core';
 import { ArschatProvidersSeedContribution } from 'arschat-providers/lib/browser/arschat-providers-seed-contribution';
 import {
@@ -12,20 +13,48 @@ import {
 } from 'arschat-providers/lib/browser/arschat-provider-preferences';
 import { ProviderSwitchService } from 'arschat-providers/lib/browser/provider-switch-service';
 
-function makeSeedService(endpoints: CustomOpenAiModelEntry[]) {
+function makeSeedService(endpoints: CustomOpenAiModelEntry[], ready = Promise.resolve()) {
     const written: CustomOpenAiModelEntry[][] = [];
     const set = jest.fn(async (_key: string, value: CustomOpenAiModelEntry[], _scope?: PreferenceScope) => { written.push(value); });
     const contribution = new ArschatProvidersSeedContribution() as any;
     contribution.preferenceService = {
-        ready: Promise.resolve(),
+        ready,
         get: (key: string, defaultValue?: unknown) => key === OPENAI_CUSTOM_ENDPOINTS_PREF ? endpoints : defaultValue,
         set
     };
     contribution.logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
-    return { contribution: contribution as ArschatProvidersSeedContribution, written, set };
+    return { contribution: contribution as ArschatProvidersSeedContribution, written, set, logger: contribution.logger };
 }
 
 describe('ProviderSwitchService local LLM providers', () => {
+
+    it('returns before preferences are ready and seeds only after a later contribution resolves them', async () => {
+        let resolve!: () => void;
+        const ready = new Promise<void>(done => { resolve = done; });
+        const existing = { id: 'lmstudio', model: 'user-model', apiKey: 'user-key' };
+        const { contribution, written, set } = makeSeedService([existing], ready);
+        expect(contribution.onStart()).toBeUndefined();
+        await Promise.resolve();
+        expect(set).not.toHaveBeenCalled();
+        resolve();
+        await waitFor(() => expect(set).toHaveBeenCalledTimes(1));
+        expect(written[0][0]).toEqual(existing);
+        expect(written[0]).toHaveLength(customEndpointProviders().length);
+    });
+
+    it.each(['readiness', 'write'])('logs a sanitized warning on %s failure', async failure => {
+        let reject!: (error: Error) => void;
+        const ready = failure === 'readiness'
+            ? new Promise<void>((_resolve, fail) => { reject = fail; }) : Promise.resolve();
+        const { contribution, set, logger } = makeSeedService([], ready);
+        const error = new Error('private-key-in-error');
+        if (failure === 'write') { set.mockRejectedValue(error); }
+        contribution.onStart();
+        if (failure === 'readiness') { reject(error); }
+        await waitFor(() => expect(logger.warn.mock.calls).toEqual([
+            ['[arschat-providers] failed to seed custom endpoints']
+        ]));
+    });
 
     it.each([
         ['no open workspace', false, false, false],

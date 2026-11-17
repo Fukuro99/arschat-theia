@@ -29,7 +29,10 @@ export class ArschatM9AutotestContribution implements FrontendApplicationContrib
         try {
             if ((await this.env.getValue('ARSCHAT_M9_AUTOTEST'))?.value !== '1') { return; }
         } catch { return; }
-        await this.run();
+        // run() waits for migration/preferences, which must not block frontend startup.
+        void this.run().catch(() => {
+            console.warn('[M9][autotest] startup failed');
+        });
     }
 
     protected async run(): Promise<void> {
@@ -75,7 +78,7 @@ export class ArschatM9AutotestContribution implements FrontendApplicationContrib
                 ? this.secrets.get('custom:m9-autotest') === 'sk-m9-autotest-dummy' && !!entry && entry.apiKey === undefined
                 : this.secrets.get('custom:m9-autotest') === undefined && entry?.apiKey === 'sk-m9-autotest-dummy');
 
-            await this.anthropic.onStart();
+            await this.anthropic.ready();
             if (this.secrets.get('anthropic') === undefined && !this.preferences.get(API_KEY_PREF)) {
                 check('injection (undefined; see arschat-secrets startup log)', this.anthropic.apiKeyInitialized);
             } else {

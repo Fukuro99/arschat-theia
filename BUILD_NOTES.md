@@ -1379,3 +1379,18 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 - account は OS ユーザー内で共有され、workspace や OpenAI/Anthropic の同じ custom id 間で分離されない。移行対象は起動時の User/Workspace で、Folder scope と外部から追加された平文の常時監視は対象外。
 - 選択済み provider は KeyStoreService の同一 backend インスタンスで保持するため、初期検査失敗後に OS 資格情報ストアが復旧しても backend 再起動まで in-memory のまま（isPersistent=false）。個々の保存・移行でも読戻し一致を確認する。
 - Windows 実機での保存 → アプリ再起動 → 実 API 応答、実 settings.json の消去、Electron ダイアログ実表示、複数ウィンドウ間のキャッシュ同期、macOS/Linux は未検証。M9 autotest は Jest のモック内で両分岐を実行した。
+
+### ms-9 マージ後の実機検証 (2026-11-17)
+
+- **起動デッドロックを発見・修正**: ms-9 を統合した直後、Electron がローディング画面のまま止まった。`--remote-debugging-port` + CDP で生きているページの DI コンテナを直接叩いて切り分けると、KeyStore / 永続性判定の RPC は即答する一方、`ArschatSecretMigration.ready()` が返らず、その中で await している `PreferenceService.ready` が解決していなかった。Theia の FrontendApplication は `FrontendApplicationContribution.onStart` を**順番に await** し、`PreferenceService.ready` は後続の contribution の起動後に解決するため、onStart の中で `preferenceService.ready` (やそれを待つ処理) を await すると起動全体が止まる。Theia 本体の AI プロバイダ contribution は `ready.then(...)` を登録するだけで await しない。移行・Anthropic/OpenAI 注入・seed・M9 autotest の onStart を非ブロッキング化して解消。**今後 onStart で preference や他サービスの準備完了を await しないこと。**
+- 再検証 (Edge の vLLM / Windows 資格情報マネージャー):
+
+| autotest | 結果 |
+|---|---|
+| `ARSCHAT_M9_AUTOTEST=1` | **3 PASS / 0 FAIL** (isPersistent=true、roundtrip、移行と即時削除、注入) |
+| `ARSCHAT_LOCAL_LLM_AUTOTEST=1` (vLLM / Edge) | **5 PASS / 0 FAIL** |
+| `ARSCHAT_M16_AUTOTEST=1` | **4 PASS / 0 FAIL** |
+| `ARSCHAT_M6_AUTOTEST=1` | **6 PASS / 0 FAIL** |
+
+- autotest 後に `cmdkey /list` に `arschat` のエントリが残っていないことを確認。
+- 実機確認できなかった項目 (ユーザー確認待ち): 「API キー」ダイアログでの実キー保存 → アプリ再起動 → そのキーで Anthropic / OpenAI が応答すること。既存の平文キーが入った実プロファイルでの移行。

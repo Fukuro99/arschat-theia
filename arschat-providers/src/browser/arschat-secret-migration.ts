@@ -31,7 +31,12 @@ export class ArschatSecretMigration implements FrontendApplicationContribution {
     private pending: Promise<void> = Promise.resolve();
     private warnedUnavailable = false;
 
-    onStart(): Promise<void> { return this.ready(); }
+    onStart(): void {
+        // Theia awaits contributions serially; preferences need later contributions to start.
+        void this.ready().catch(() => {
+            this.logger.warn('[arschat-secrets] migration startup failed; plaintext preferences retained');
+        });
+    }
 
     ready(): Promise<void> {
         return this.startup ?? (this.startup = this.migrate());
