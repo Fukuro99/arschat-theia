@@ -21,6 +21,7 @@ import { ArschatChatContribution } from './arschat-chat-contribution';
 import { ArschatHistoryWidget } from './arschat-history-widget';
 import { ArschatHistoryContribution } from './arschat-history-contribution';
 import { ArschatChatUiService } from './arschat-chat-ui-service';
+import { ArschatApiKeysDialogService } from './arschat-api-keys-dialog';
 import { ArschatStatsStore } from './arschat-stats-store';
 import { ArschatInformationalPartRenderer } from './arschat-informational-part-renderer';
 import { ArschatM3AutotestContribution } from './arschat-m3-autotest-contribution';
@@ -42,6 +43,7 @@ import 'katex/dist/katex.min.css';
 export default new ContainerModule(bind => {
     // Shared coordination service (chat widget <-> history panel).
     bind(ArschatChatUiService).toSelf().inSingletonScope();
+    bind(ArschatApiKeysDialogService).toSelf().inSingletonScope();
 
     // Per-message elapsed-time store backing the stats bar (M6 e-25).
     bind(ArschatStatsStore).toSelf().inSingletonScope();

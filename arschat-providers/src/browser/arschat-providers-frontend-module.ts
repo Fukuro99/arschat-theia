@@ -15,15 +15,37 @@
 // *****************************************************************************
 
 import { ContainerModule } from '@theia/core/shared/inversify';
-import { FrontendApplicationContribution } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution, RemoteConnectionProvider, ServiceConnectionProvider } from '@theia/core/lib/browser';
+import { ArschatKeychainStatusService, arschatKeychainStatusPath } from '../common/arschat-keychain-status-service';
 import { bindArschatProviderPreferences } from './arschat-provider-preferences';
 import { ProviderSwitchService } from './provider-switch-service';
 import { ArschatProvidersSeedContribution } from './arschat-providers-seed-contribution';
 import { ArschatM2AutotestContribution } from './arschat-m2-autotest-contribution';
 import { ArschatLocalLlmAutotestContribution } from './arschat-local-llm-autotest-contribution';
+import { AnthropicFrontendApplicationContribution } from '@theia/ai-anthropic/lib/browser/anthropic-frontend-application-contribution';
+import { OpenAiFrontendApplicationContribution } from '@theia/ai-openai/lib/browser/openai-frontend-application-contribution';
+import { ArschatSecretStore } from './arschat-secret-store';
+import { ArschatSecretMigration } from './arschat-secret-migration';
+import { ArschatAnthropicFrontendContribution, ArschatOpenAiFrontendContribution } from './arschat-secret-frontend-contributions';
+import { ArschatM9AutotestContribution } from './arschat-m9-autotest-contribution';
+import { ArschatSecretSettings } from './arschat-secret-settings';
 
-export default new ContainerModule(bind => {
+export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     bindArschatProviderPreferences(bind);
+
+    bind(ArschatKeychainStatusService).toDynamicValue(ctx =>
+        ctx.container.get<ServiceConnectionProvider>(RemoteConnectionProvider)
+            .createProxy<ArschatKeychainStatusService>(arschatKeychainStatusPath)
+    ).inSingletonScope();
+
+    bind(ArschatSecretStore).toSelf().inSingletonScope();
+    bind(ArschatSecretSettings).toSelf().inSingletonScope();
+    bind(ArschatSecretMigration).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatSecretMigration);
+    rebind(AnthropicFrontendApplicationContribution).to(ArschatAnthropicFrontendContribution).inSingletonScope();
+    rebind(OpenAiFrontendApplicationContribution).to(ArschatOpenAiFrontendContribution).inSingletonScope();
+    bind(ArschatM9AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM9AutotestContribution);
 
     bind(ProviderSwitchService).toSelf().inSingletonScope();
 

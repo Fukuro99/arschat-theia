@@ -1,5 +1,7 @@
 class ApplicationShell {}
 
 module.exports = {
-    ApplicationShell
+    ApplicationShell,
+    FrontendApplicationContribution: Symbol('FrontendApplicationContribution'),
+    RemoteConnectionProvider: Symbol('RemoteConnectionProvider')
 };

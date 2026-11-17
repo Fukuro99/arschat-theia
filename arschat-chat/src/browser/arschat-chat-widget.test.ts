@@ -3,6 +3,7 @@ import { ContainerModule, Container } from '@theia/core/shared/inversify';
 import { ApplicationShell } from '@theia/core/lib/browser';
 import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
 import { ArschatChatWidget } from './arschat-chat-widget';
+import { ArschatApiKeysDialogService } from './arschat-api-keys-dialog';
 import { CommandRegistry } from '@theia/core/lib/common/command';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatSessionStore } from '@theia/ai-chat/lib/common/chat-session-store';
@@ -56,6 +57,7 @@ describe('ArschatChatWidget', () => {
     let setActiveCalls: Array<{ provider: ArschatProviderKind; model?: string }>;
     let sendRequestCalls: Array<{ sessionId: string; request: { text: string; displayText?: string; variables?: AIVariableResolutionRequest[] } }>;
     let executeCommand: jest.Mock;
+    let openApiKeys: jest.Mock;
     let bottomExpanded: boolean;
     let bottomWidgets: Array<{ id: string; isVisible: boolean }>;
     let collapsePanel: jest.Mock;
@@ -92,6 +94,7 @@ describe('ArschatChatWidget', () => {
         setActiveCalls = [];
         sendRequestCalls = [];
         executeCommand = jest.fn();
+        openApiKeys = jest.fn(async () => undefined);
         bottomExpanded = false;
         bottomWidgets = [];
         collapsePanel = jest.fn((area: string) => {
@@ -133,6 +136,7 @@ describe('ArschatChatWidget', () => {
             return normalized;
         });
         const module = new ContainerModule(bind => {
+            bind(ArschatApiKeysDialogService).toConstantValue({ open: openApiKeys } as unknown as ArschatApiKeysDialogService);
             // Minimal stubs: doInit() is async and fired from postConstruct, but render()
             // works off the widget's own fields, so a bare stub is enough for rendering.
             bind(CommandRegistry).toConstantValue({
@@ -722,6 +726,15 @@ describe('ArschatChatWidget', () => {
         } finally {
             updateSpy.mockRestore();
         }
+    });
+
+    it('opens the API key dialog from the header without a focus-dependent command', () => {
+        const ui = render(asAny(widget).render());
+        fireEvent.click(ui.getByRole('button', { name: 'API キー' }));
+        expect(openApiKeys).toHaveBeenCalledTimes(1);
+        expect(executeCommand).not.toHaveBeenCalled();
+        const button = ui.getByRole('button', { name: 'API キー' });
+        expect(button.previousElementSibling?.id).toBe('arschat-terminal-toggle-button');
     });
 
     it('builds OpenAI-compatible /models URLs and parses model ids', () => {
