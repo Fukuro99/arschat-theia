@@ -38,6 +38,8 @@
 
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
 import { Emitter, Event, ILogger, PreferenceScope, PreferenceService } from '@theia/core';
+import { ArschatSecretStore } from './arschat-secret-store';
+import { customSecretAccount } from './arschat-secret-migration';
 import {
     AISettingsService,
     LanguageModel,
@@ -131,6 +133,9 @@ export class ProviderSwitchService {
 
     @inject(PreferenceService)
     protected readonly preferenceService!: PreferenceService;
+
+    @inject(ArschatSecretStore)
+    protected readonly secretStore!: ArschatSecretStore;
 
     @inject(AISettingsService)
     protected readonly settingsService!: AISettingsService;
@@ -362,6 +367,7 @@ export class ProviderSwitchService {
     }
 
     async fetchCustomEndpointModels(kind: ArschatProviderKind, options: FetchCustomEndpointModelsOptions = {}): Promise<string[]> {
+        await this.secretStore?.ready();
         const endpoint = this.getCustomEndpoint(kind);
         if (!endpoint?.url) {
             throw new Error(`No custom endpoint URL configured for provider '${kind}'`);
@@ -392,9 +398,9 @@ export class ProviderSwitchService {
      * Build the Authorization header for a custom endpoint's /models request.
      *  - `apiKey: '<literal>'`  -> `Bearer <literal>` (per-endpoint key).
      *  - `apiKey: true`         -> Theia's "use the global OpenAI API key" flag, so
-     *                              we read `ai-features.openAiOfficial.openAiApiKey`
+     *                              we read the secret store (legacy preference as fallback)
      *                              and send it as `Bearer <globalKey>` when non-empty.
-     *  - otherwise / empty      -> no Authorization header.
+     *  - undefined apiKey       -> the endpoint's secret-store account, if present.
      */
     protected resolveCustomEndpointAuthHeader(endpoint: CustomOpenAiModelEntry): Record<string, string> {
         const apiKey = endpoint.apiKey;
@@ -402,10 +408,15 @@ export class ProviderSwitchService {
             return { Authorization: `Bearer ${apiKey.trim()}` };
         }
         if (apiKey === true) {
-            const globalKey = this.preferenceService.get<string>(OPENAI_OFFICIAL_API_KEY_PREF, '')?.trim();
+            const globalKey = (this.secretStore?.get('openai')
+                ?? this.preferenceService.get<string>(OPENAI_OFFICIAL_API_KEY_PREF, ''))?.trim();
             if (globalKey) {
                 return { Authorization: `Bearer ${globalKey}` };
             }
+        } else if (apiKey === undefined) {
+            const account = customSecretAccount(endpoint);
+            const key = account && this.secretStore?.get(account)?.trim();
+            if (key) { return { Authorization: `Bearer ${key}` }; }
         }
         return {};
     }

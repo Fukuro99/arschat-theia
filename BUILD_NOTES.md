@@ -1340,3 +1340,42 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 - チャットヘッダーで「ローカル」グループから vLLM を選び、接続先 URL 欄に Edge の URL を入れて手で会話する操作 (autotest は同じ API を直接呼んでいる)。
 - Ollama / llama.cpp の実サーバーとの往復 (手元に起動中のサーバーが無いため未実施)。
 - 実際のユーザーメモリ DB での自動想起・自動保存 (autotest は一時 DB)。
+## Phase 1 ms-9 実装メモ (API キーの OS 金庫保存)
+
+作業日: 2026-11-17 / 対象: `docs/briefs/MS9_BRIEF.md` および3巡目レビューまでの設計変更。コミットは行っていない。
+
+### 構成・永続性の判定
+
+- `arschat-providers/src/common/arschat-keychain-status-service.ts`: `ArschatKeychainStatusService.isPersistent(): Promise<boolean>` を定義。新設した node backend module を package.json の `theiaExtensions.backend` に登録し、`RpcConnectionHandler` で公開する。frontend は Theia 標準の `RemoteConnectionProvider / ServiceConnectionProvider.createProxy` を使用。
+- `src/node/arschat-key-store-service-impl.ts`: `ArschatKeyStoreServiceImpl extends KeyStoreServiceImpl` を新設。`isPersistent()` は同じインスタンスの `await this.getKeytar()` が `InMemoryCredentialsProvider` でなければ true。Theia は初期検査前に内部フィールドへ keytar を代入するため、getKeytar の初期化 Promise を共有し、同時の状態判定・読込み・書込みも検査完了を待つ。独立した keytar import / set / get / delete プローブは撤去。
+- backend module は `isBound(KeyStoreService)` を確認してから `rebind(KeyStoreService).to(ArschatKeyStoreServiceImpl).inSingletonScope()`。core 未登録ならロード時に失敗させる。Theia の `backend-application-module.ts:124` の bind と `:126` の RPC ハンドラーは `container.get(KeyStoreService)` を使用するため、資格情報 RPC も差し替えた実体へ到達する。`application-manager/lib/generator/backend-generator.js` でも core → extension のロード順を確認。`ArschatKeychainStatusServiceImpl` は KeyStoreService を inject して isPersistent を呼ぶだけで、独自キャッシュは持たない。
+- 根拠はローカル Theia 1.71.2 の `core/src/node/key-store-server.ts`。動的 import または初期 `findCredentials('test-keytar-loads')` が失敗すると `InMemoryCredentialsProvider` に切り替わる。frontend の再生成や読み戻し成功だけを永続性の根拠にしない。
+- `arschat-secret-store.ts`: 保存先は引き続き Theia `KeyStoreService` の RPC、service=`arschat`、account=`anthropic` / `openai` / `custom:<endpoint id>`。先読みは keys → getPassword（Windows の分割値を復元）。先読み成功時もキャッシュ差分の account 名だけを onDidChange で通知し、初回失敗後の再試行でもモデルへ再注入する。書込みを直列化し、保存・削除の読戻し確認後にキャッシュとイベントを更新する。既存値の verify はキャッシュと backend の一致を確認し、既存資格情報を書き直さない。例外は固定文に置き換える。
+
+### 移行・UI 保存・注入
+
+- `arschat-secret-migration.ts`: 起動時の共有 Promise と直列化を維持。永続性判定より前に必ず secrets.ready() で先読みする。isPersistent=false ならコピーも平文削除も行わず、固定 warn を frontend インスタンスにつき1回だけ出す。true のときだけ金庫へ保存 → backend 読戻し一致 → 平文削除を同一起動内で実施する。既存 account は書き換えず再照合し、不一致や例外なら平文を保持する。
+- Anthropic / OpenAI contribution は先読みと移行の両 Promise を待って既存キーを注入する。保存不可や状態 RPC の失敗でも読めるキーを使用する。先読み失敗時も変更リスナーを設置し、後から UI 等で先読みが成功すれば onDidChange によりグローバル・カスタムモデルを再注入する。
+- 2段階削除、SHA-256 ハッシュ、StorageService の削除待ち記録、deferCleanup / forgetCleanup は撤去した。旧記録は参照も更新もしないため、欠損・破損が保存や削除を妨げない。
+- 対象は User/Workspace の両グローバルキーと両 provider の custom endpoint 配列。既存金庫値が最優先、未保存なら Workspace → User の順で保存する。グローバルは undefined、custom は apiKey フィールドの除去。id 省略時は Theia と同じ model 名を使う。RPC 待ち中の設定変更を守るため、設定を再読込みし移行対象と一致する平文だけ除去する。apiKey=true と公開値 sk-unsloth-local は自動移行しない。
+- `arschat-secret-settings.ts` / `arschat-api-keys-dialog.ts`: isPersistent=false の UI 保存は金庫・preference の変更前に拒否し、「OS の資格情報マネージャーが使えないため保存できません」を表示する。true なら保存・読戻し検証後、同じ account の旧グローバル平文と custom apiKey を両スコープから即時削除する。設定変更通知を通して新キーをすぐモデルへ注入し、旧 custom 文字列が優先され続ける問題を解消した。失敗時は固定エラー表示、入力は再試行できるよう残す。
+- apiKey=true の前回修正を維持。自動移行・通常注入・/models はグローバル指定として扱い、明示的な個別キー保存時のみ個別金庫値へ切り替える。明示的削除は旧平文と金庫値を除去するが、true と公開ダミー値は残す。
+- 両 frontend contribution の singleton rebind、環境変数 fallback、proxy / max retries / OpenAI Responses API / モデル追加変更削除の追従、uncontrolled password 入力と保存済みキーを DOM に戻さない仕様は維持。
+- `arschat-m9-autotest-contribution.ts`: backend 環境変数 ARSCHAT_M9_AUTOTEST=1 でのみ実行。isPersistent の結果をログに出す。true は roundtrip と即時移行削除、false は roundtrip を SKIP し平文保持・コピーなしを検証する。Anthropic 注入確認と SUMMARY、予約済みデータ保護、テスト所有データだけの後片付けを維持した。削除待ち記録の操作はない。
+
+### 回帰テスト・検証結果
+
+- `arschat-secrets.test.ts`: false 時の両スコープ・両 provider の平文保持、frontend 再読み込み（backend メモリ維持）と backend 再起動、warn 1回、UI 保存拒否と日本語表示、true 時の即時移行削除、UI 保存後の旧平文削除と新キー注入、既存金庫値の変更、設定書込み失敗と再試行、apiKey=true / false、autotest 両分岐、frontend RPC proxy の DI を検証。
+- `arschat-keychain-status.test.ts`: node 環境で実 Theia backendApplicationModule → providersModule をロードし、事前 isBound、singleton rebind、資格情報/状態の両 RPC の参照先、core 未登録時の拒否を検証する。このテストだけ KeyStoreServiceImpl のロード禁止を解除し、getKeytar は spy で差し替え、keytar 自体は常に jest.mock の偽物。実選択ロジックを呼ぶケースも偽 keytar のみを使う。native/in-memory 判定、初期 findCredentials 失敗後に native が復旧しても同じインスタンスは false のまま、再起動時の再選択、同時 RPC が初期検査失敗を待つことを両呼出し順で検証。独立プローブの書込み・削除がないことも確認。実 OS 資格情報ストアにはアクセスしていない。
+- `arschat-secrets.test.ts` の3巡目追加: 両 provider で isPersistent=false / 状態 RPC 失敗時の既存グローバル・カスタムキー注入、先読み完了前は注入しないこと、先読み失敗後の再試行による再注入、移行書込み完了を待った注入を検証。
+- providers / chat / agents / tools / extensions / branding の TypeScript build はすべて成功。chat のみ junction 回避用のリポジトリ外 tsconfig を使用。
+- Jest 全体は chat **13 suites / 213 tests**、agents **11 suites / 114 tests**、tools **13 suites / 102 tests**、extensions **5 suites / 21 tests**、branding **2 suites / 33 tests** が成功（合計 **44 suites / 483 tests 成功**、既存の2 suites / 3 tests は SKIP）。既存の React act 警告は残る。
+- node_modules はメイン checkout への junction。回避策は既存の `%TEMP%/arschat-ms9-review-validation/tsconfig.json` と `jest.config.cjs` のみを使用。前者は元 tsconfig を extends し worktree の providers/lib と型定義を指定、後者は元 Jest 設定を読み providers の解決先と ts-jest 設定だけ上書きする。リポジトリの tsconfig / Jest config に追加マッピングは残していない。
+- 検証コマンド: `npm --prefix arschat-providers run build`、`npm --prefix arschat-chat run build -- --project "%TEMP%/arschat-ms9-review-validation/tsconfig.json"`。chat は ARSCHAT_VALIDATION_ROOT を worktree に設定し `node node_modules/jest/bin/jest.js --config "%TEMP%/arschat-ms9-review-validation/jest.config.cjs" --runInBand`、ほかの4パッケージは各 `npm --prefix <package> run build` と `npm --prefix <package> test -- --runInBand`。ログも同じ一時ディレクトリの review3-*-test.log / review3-*-build.log に保存（providers build は端末出力）。
+- `git diff --check` は成功。lib は tsc による worktree 内生成のみ。node_modules の変更、npm install、git commit は行っていない。アプリバンドルは brief の「指揮側が実施。ここでは実行しない」に従って未実行。
+
+### 既知事項・未確認事項
+
+- account は OS ユーザー内で共有され、workspace や OpenAI/Anthropic の同じ custom id 間で分離されない。移行対象は起動時の User/Workspace で、Folder scope と外部から追加された平文の常時監視は対象外。
+- 選択済み provider は KeyStoreService の同一 backend インスタンスで保持するため、初期検査失敗後に OS 資格情報ストアが復旧しても backend 再起動まで in-memory のまま（isPersistent=false）。個々の保存・移行でも読戻し一致を確認する。
+- Windows 実機での保存 → アプリ再起動 → 実 API 応答、実 settings.json の消去、Electron ダイアログ実表示、複数ウィンドウ間のキャッシュ同期、macOS/Linux は未検証。M9 autotest は Jest のモック内で両分岐を実行した。

@@ -18,6 +18,7 @@
 // *****************************************************************************
 
 import * as React from 'react';
+import { ArschatApiKeysDialogService } from './arschat-api-keys-dialog';
 import { injectable, postConstruct, inject } from '@theia/core/shared/inversify';
 import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
 import { ApplicationShell, type Message } from '@theia/core/lib/browser';
@@ -211,6 +212,9 @@ export class ArschatChatWidget extends ReactWidget {
 
     @inject(ApplicationShell)
     protected readonly shell!: ApplicationShell;
+
+    @inject(ArschatApiKeysDialogService)
+    protected readonly apiKeysDialog!: ArschatApiKeysDialogService;
 
     protected sessionId: string | undefined;
     /** id of the request currently being generated (for abort). */
@@ -1789,6 +1793,11 @@ export class ArschatChatWidget extends ReactWidget {
                             title='ターミナルの表示/非表示'
                             onClick={() => this.toggleTerminal()}
                         >ターミナル</button>
+                        <button
+                            id='arschat-api-keys-button'
+                            className='theia-button secondary'
+                            onClick={() => { void this.apiKeysDialog.open(); }}
+                        >API キー</button>
                     </div>
                 </div>
                 {this.isCustomEndpointProvider(this.provider) && (
