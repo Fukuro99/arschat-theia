@@ -20,6 +20,7 @@ import { bindArschatProviderPreferences } from './arschat-provider-preferences';
 import { ProviderSwitchService } from './provider-switch-service';
 import { ArschatProvidersSeedContribution } from './arschat-providers-seed-contribution';
 import { ArschatM2AutotestContribution } from './arschat-m2-autotest-contribution';
+import { ArschatLocalLlmAutotestContribution } from './arschat-local-llm-autotest-contribution';
 
 export default new ContainerModule(bind => {
     bindArschatProviderPreferences(bind);
@@ -31,4 +32,7 @@ export default new ContainerModule(bind => {
 
     bind(ArschatM2AutotestContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ArschatM2AutotestContribution);
+
+    bind(ArschatLocalLlmAutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatLocalLlmAutotestContribution);
 });

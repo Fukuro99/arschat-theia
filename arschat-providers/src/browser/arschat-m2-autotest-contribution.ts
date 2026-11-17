@@ -6,11 +6,12 @@
 // see BUILD_NOTES.md PoC-3 ハマった点 4). Completely no-op otherwise.
 //
 // It:
-//   1. logs every registered LanguageModel (expects all 4 providers' models);
+//   1. logs every registered LanguageModel (expects every ArsChat provider's
+//      models - cloud ones and the local OpenAI-compatible endpoints);
 //   2. for each provider, if it is "available" runs a live round-trip with the
 //      prompt "Reply with exactly: PONG" (Anthropic/OpenAI gated on API keys,
-//      LM Studio/Unsloth gated on their /v1/models endpoint answering); prints
-//      SKIP with the reason otherwise;
+//      every custom-endpoint provider gated on its configured /v1/models
+//      endpoint answering); prints SKIP with the reason otherwise;
 //   3. exercises the switch: flips arschat.provider.active via ProviderSwitchService
 //      and logs the agent's resolved model id after each flip.
 //
@@ -26,10 +27,11 @@ import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ProviderSwitchService, ARSCHAT_CHAT_AGENT_ID } from './provider-switch-service';
 import {
     ArschatProviderKind,
-    LMSTUDIO_DEFAULT_URL,
-    PROVIDERS,
-    UNSLOTH_DEFAULT_URL
+    PROVIDERS
 } from './arschat-provider-preferences';
+
+/** Unsloth Studio answers on :8888 when nothing is listening on its default :8000. */
+const UNSLOTH_FALLBACK_MODELS_URL = 'http://localhost:8888/v1/models';
 
 const PONG_PROMPT = 'Reply with exactly: PONG';
 
@@ -91,7 +93,7 @@ export class ArschatM2AutotestContribution implements FrontendApplicationContrib
         // ---- 3. switch exercise ----
         console.log('[M2][autotest] --- switch exercise ---');
         for (const p of PROVIDERS) {
-            // pick a representative model name for anthropic/openai; custom endpoints ignore it.
+            // Pick an actual model name; custom endpoint IDs only identify the LanguageModel.
             const modelName = await this.pickModelName(p.kind, models);
             const selection = await this.switchService.setActive(p.kind, modelName);
             const agent = this.chatAgentService.getAgent(ARSCHAT_CHAT_AGENT_ID) as { languageModelRequirements?: Array<{ purpose: string; identifier?: string }> } | undefined;
@@ -105,7 +107,11 @@ export class ArschatM2AutotestContribution implements FrontendApplicationContrib
     protected async pickModelName(kind: ArschatProviderKind, models: LanguageModel[]): Promise<string | undefined> {
         const provider = PROVIDERS.find(p => p.kind === kind);
         if (provider?.fixedModelId) {
-            return provider.fixedModelId;
+            const configuredModel = this.switchService.getCustomEndpointModel(kind);
+            if (configuredModel && configuredModel !== 'local-model') {
+                return configuredModel;
+            }
+            return (await this.switchService.fetchCustomEndpointModels(kind))[0];
         }
         const prefix = kind === 'openai' ? 'openai/' : 'anthropic/';
         const first = models.find(m => m.id.startsWith(prefix));
@@ -126,14 +132,15 @@ export class ArschatM2AutotestContribution implements FrontendApplicationContrib
             const key = await this.getBackendEnv('OPENAI_API_KEY');
             available = !!key;
             skipReason = 'OPENAI_API_KEY not set';
-        } else if (kind === 'lmstudio') {
-            available = await this.probeEndpoint(`${LMSTUDIO_DEFAULT_URL}/models`);
-            skipReason = `no server answering at ${LMSTUDIO_DEFAULT_URL}/models`;
-        } else if (kind === 'unsloth') {
-            const p8000 = await this.probeEndpoint(`${UNSLOTH_DEFAULT_URL}/models`);
-            const p8888 = p8000 ? false : await this.probeEndpoint('http://localhost:8888/v1/models');
-            available = p8000 || p8888;
-            skipReason = `no server answering at ${UNSLOTH_DEFAULT_URL}/models or :8888/v1/models`;
+        } else if (provider.fixedModelId) {
+            const modelsUrl = `${this.switchService.getCustomEndpointUrl(kind)}/models`;
+            available = await this.probeEndpoint(modelsUrl);
+            skipReason = `no server answering at ${modelsUrl}`;
+            if (kind === 'unsloth' && !available) {
+                // Unsloth Studio serves :8888 when :8000 is taken, so try it too.
+                available = await this.probeEndpoint(UNSLOTH_FALLBACK_MODELS_URL);
+                skipReason = `no server answering at ${modelsUrl} or ${UNSLOTH_FALLBACK_MODELS_URL}`;
+            }
         }
 
         if (!available) {

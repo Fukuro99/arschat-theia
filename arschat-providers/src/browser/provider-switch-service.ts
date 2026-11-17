@@ -46,16 +46,16 @@ import {
 } from '@theia/ai-core';
 import {
     ArschatProviderKind,
-    LMSTUDIO_DEFAULT_URL,
-    LMSTUDIO_ID,
+    CustomOpenAiModelEntry,
     OPENAI_CUSTOM_ENDPOINTS_PREF,
     PREF_ACTIVE_MODEL,
     PREF_ACTIVE_PROVIDER,
     PROVIDERS,
-    UNSLOTH_DEFAULT_URL,
-    UNSLOTH_ID,
+    defaultCustomEndpointFor,
     providerByKind
 } from './arschat-provider-preferences';
+
+export type { CustomOpenAiModelEntry } from './arschat-provider-preferences';
 
 /** The purpose all ArsChat chat requests use. */
 export const ARSCHAT_CHAT_PURPOSE = 'chat';
@@ -81,16 +81,6 @@ export interface ArschatActiveSelection {
     model: string;
     /** The resolved registered LanguageModel id the agent should use. */
     modelId: string;
-}
-
-export interface CustomOpenAiModelEntry {
-    id?: string;
-    model?: string;
-    url?: string;
-    apiKey?: string | boolean;
-    enableStreaming?: boolean;
-    developerMessageSettings?: string;
-    [k: string]: unknown;
 }
 
 export interface FetchCustomEndpointModelsOptions {
@@ -466,31 +456,12 @@ export class ProviderSwitchService {
         return next;
     }
 
+    /** The customOpenAiModels entry id backing a custom-endpoint provider (undefined for cloud ones). */
     protected customEndpointIdFor(kind: ArschatProviderKind): string | undefined {
-        const fixedModelId = providerByKind(kind)?.fixedModelId;
-        return fixedModelId === LMSTUDIO_ID || fixedModelId === UNSLOTH_ID ? fixedModelId : undefined;
+        return providerByKind(kind)?.fixedModelId;
     }
 
     protected defaultCustomEndpoint(kind: ArschatProviderKind): CustomOpenAiModelEntry | undefined {
-        if (kind === 'lmstudio') {
-            return {
-                id: LMSTUDIO_ID,
-                model: 'local-model',
-                url: LMSTUDIO_DEFAULT_URL,
-                enableStreaming: true,
-                developerMessageSettings: 'system'
-            };
-        }
-        if (kind === 'unsloth') {
-            return {
-                id: UNSLOTH_ID,
-                model: 'local-model',
-                url: UNSLOTH_DEFAULT_URL,
-                apiKey: 'sk-unsloth-local',
-                enableStreaming: true,
-                developerMessageSettings: 'system'
-            };
-        }
-        return undefined;
+        return defaultCustomEndpointFor(kind);
     }
 }

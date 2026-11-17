@@ -1,38 +1,29 @@
 // *****************************************************************************
 // ArsChat providers seed contribution (PHASE1_DESIGN.md §4.1).
 //
-// On startup, ensures LM Studio and Unsloth Studio exist as entries in the
-// shared Theia AI `ai-features.openAiCustom.customOpenAiModels` array (with
-// stable ids `lmstudio` / `unsloth` and sensible default URLs). We only ADD
-// missing entries - we never overwrite a user's edits to an existing entry, so
-// the user can freely change the URL / model / apiKey afterwards.
+// On startup, ensures every ArsChat custom-endpoint provider (LM Studio /
+// Ollama / vLLM / llama.cpp / Unsloth Studio / generic OpenAI-compatible)
+// exists as an entry in the shared Theia AI
+// `ai-features.openAiCustom.customOpenAiModels` array, with its stable id and
+// default URL. We only ADD missing entries - we never overwrite a user's edits
+// to an existing entry, so the user can freely change the URL / model / apiKey
+// afterwards.
 //
-// This is what makes "4 providers are configurable" true out of the box: two
-// of the four (LM Studio, Unsloth) are OpenAI-compatible custom endpoints and
-// would otherwise require the user to hand-author JSON. Anthropic and official
-// OpenAI already ship default model lists in their own packages.
+// This is what makes all of ArsChat's providers configurable out of the box:
+// the custom-endpoint ones are OpenAI-compatible local servers and would
+// otherwise require the user to hand-author JSON. Anthropic and official OpenAI
+// already ship default model lists in their own packages.
 // *****************************************************************************
 
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { ILogger, PreferenceService } from '@theia/core';
 import {
-    LMSTUDIO_DEFAULT_URL,
-    LMSTUDIO_ID,
+    CustomOpenAiModelEntry,
     OPENAI_CUSTOM_ENDPOINTS_PREF,
-    UNSLOTH_DEFAULT_URL,
-    UNSLOTH_ID
+    customEndpointProviders,
+    defaultCustomEndpointFor
 } from './arschat-provider-preferences';
-
-interface CustomOpenAiModelEntry {
-    id?: string;
-    model?: string;
-    url?: string;
-    apiKey?: string | boolean;
-    enableStreaming?: boolean;
-    developerMessageSettings?: string;
-    [k: string]: unknown;
-}
 
 @injectable()
 export class ArschatProvidersSeedContribution implements FrontendApplicationContribution {
@@ -49,30 +40,19 @@ export class ArschatProvidersSeedContribution implements FrontendApplicationCont
         const byId = new Set(existing.map(e => (typeof e.id === 'string' ? e.id : e.model)));
 
         const seeds: CustomOpenAiModelEntry[] = [];
-        if (!byId.has(LMSTUDIO_ID)) {
-            seeds.push({
-                id: LMSTUDIO_ID,
-                // A generic placeholder model name; the local server serves whatever model is loaded.
-                model: 'local-model',
-                url: LMSTUDIO_DEFAULT_URL,
-                enableStreaming: true,
-                developerMessageSettings: 'system'
-            });
-        }
-        if (!byId.has(UNSLOTH_ID)) {
-            seeds.push({
-                id: UNSLOTH_ID,
-                model: 'local-model',
-                url: UNSLOTH_DEFAULT_URL,
-                // Unsloth Studio requires a Bearer token; users replace this with their real sk-unsloth-... key.
-                apiKey: 'sk-unsloth-local',
-                enableStreaming: true,
-                developerMessageSettings: 'system'
-            });
+        for (const provider of customEndpointProviders()) {
+            const id = provider.fixedModelId;
+            if (!id || byId.has(id)) {
+                continue;
+            }
+            const seed = defaultCustomEndpointFor(provider.kind);
+            if (seed) {
+                seeds.push(seed);
+            }
         }
 
         if (seeds.length === 0) {
-            this.logger.info('[arschat-providers] custom endpoints already present (lmstudio/unsloth), no seeding needed');
+            this.logger.info('[arschat-providers] custom endpoints already present, no seeding needed');
             return;
         }
 

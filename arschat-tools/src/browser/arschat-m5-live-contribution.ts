@@ -13,12 +13,12 @@
 // as the M2/M3/M4/e-7 autotests). Completely no-op otherwise.
 //
 // ---- What "live" changes vs e-7 -------------------------------------------
-//   * NO mock model. On start we (a) point the shared `lmstudio` custom OpenAI
-//     endpoint at the LAN LM Studio URL + real model (overridable via
-//     ARSCHAT_M5_LIVE_URL / ARSCHAT_M5_LIVE_MODEL), which re-registers the
-//     `lmstudio` LanguageModel (openai-frontend-application-contribution reacts to
-//     the preference change), then (b) switch the ArsChat agent to it via
-//     ProviderSwitchService.setActive('lmstudio').
+//   * NO mock model. On start we (a) point the chosen custom OpenAI endpoint
+//     (default `lmstudio`, selected via ARSCHAT_M5_LIVE_PROVIDER) at the LAN URL +
+//     real model (overridable via ARSCHAT_M5_LIVE_URL / ARSCHAT_M5_LIVE_MODEL),
+//     which re-registers that endpoint's LanguageModel (openai-frontend-application-
+//     contribution reacts to the preference change), then (b) point the ArsChat
+//     agent at it directly (see pointAgentAtProvider for why we skip setActive).
 //   * We send REAL natural-language prompts through ChatService and let the model
 //     itself decide to call tools. We assert on the ASSISTANT'S REPLY TEXT
 //     (response.response.asString()), not on a mock's captured result.
@@ -66,8 +66,10 @@ import { ToolConfirmationMode } from '@theia/ai-chat/lib/common/chat-tool-prefer
 import { AISettingsService, LanguageModelRegistry, LanguageModelRequirement } from '@theia/ai-core';
 import { ARSCHAT_CHAT_AGENT_ID, ARSCHAT_CHAT_PURPOSE } from 'arschat-providers/lib/browser/provider-switch-service';
 import {
+    ArschatProviderKind,
     LMSTUDIO_ID,
-    OPENAI_CUSTOM_ENDPOINTS_PREF
+    OPENAI_CUSTOM_ENDPOINTS_PREF,
+    PROVIDERS
 } from 'arschat-providers/lib/browser/arschat-provider-preferences';
 import { ArschatFileToolsService } from './arschat-file-tools-service';
 import { WRITE_FILE_TOOL_ID } from '../common/tool-ids';
@@ -75,7 +77,7 @@ import { WRITE_FILE_TOOL_ID } from '../common/tool-ids';
 /** Theia's tool-confirmation preference key (mirrors chat-tool-preferences). */
 const TOOL_CONFIRMATION_PREF = 'ai-features.chat.toolConfirmation';
 
-/** Defaults for the LAN LM Studio (overridable via env). Confirmed reachable + tool-calling in e-10. */
+/** Defaults for the LAN LM Studio (overridable via env: ARSCHAT_M5_LIVE_PROVIDER / _URL / _MODEL). Confirmed reachable + tool-calling in e-10. */
 const DEFAULT_LIVE_URL = 'http://192.168.1.149:1234/v1';
 const DEFAULT_LIVE_MODEL = 'qwen/qwen3.6-35b-a3b';
 
@@ -157,13 +159,20 @@ export class ArschatM5LiveContribution implements FrontendApplicationContributio
 
     protected async run(): Promise<void> {
         this.log('[M5-LIVE] enabled (frontend) — real LLM tool verification');
+        const providerKind = (await this.getBackendEnv('ARSCHAT_M5_LIVE_PROVIDER')) || LMSTUDIO_ID;
+        if (!PROVIDERS.some(p => p.kind === providerKind && !!p.fixedModelId)) {
+            this.log(`[M5-LIVE] SETUP FAILED: ARSCHAT_M5_LIVE_PROVIDER='${providerKind}' is not a custom-endpoint provider kind`);
+            this.log('[M5-LIVE] SUMMARY: 0 PASS / 5 FAIL (setup failed) — L4 not measured');
+            return;
+        }
+        const provider = providerKind as ArschatProviderKind;
         const url = (await this.getBackendEnv('ARSCHAT_M5_LIVE_URL')) || DEFAULT_LIVE_URL;
         const model = (await this.getBackendEnv('ARSCHAT_M5_LIVE_MODEL')) || DEFAULT_LIVE_MODEL;
 
         try {
-            await this.pointAgentAtLmStudio(url, model);
+            await this.pointAgentAtProvider(provider, url, model);
         } catch (e) {
-            this.log(`[M5-LIVE] SETUP FAILED (could not point agent at LM Studio): ${e instanceof Error ? e.message : String(e)}`);
+            this.log(`[M5-LIVE] SETUP FAILED (could not point agent at '${provider}'): ${e instanceof Error ? e.message : String(e)}`);
             this.log('[M5-LIVE] SUMMARY: 0 PASS / 5 FAIL (setup failed) — L4 not measured');
             return;
         }
@@ -190,9 +199,10 @@ export class ArschatM5LiveContribution implements FrontendApplicationContributio
     // ------------------------------------------------------------- provider setup
 
     /**
-     * Repoint the shared `lmstudio` custom OpenAI endpoint at the LAN URL + real
-     * model (re-registering the `lmstudio` LanguageModel), then point the ArsChat
-     * agent at it. Snapshots the endpoint preference for restoration.
+     * Repoint the chosen custom OpenAI endpoint (default `lmstudio`, selected via
+     * ARSCHAT_M5_LIVE_PROVIDER) at the LAN URL + real model (re-registering that
+     * endpoint's LanguageModel), then point the ArsChat agent at it. Snapshots the
+     * endpoint preference for restoration.
      *
      * NOTE: we do NOT go through ProviderSwitchService.setActive here, because that
      * writes the `arschat.provider.*` preferences at the (default) Workspace scope,
@@ -202,35 +212,35 @@ export class ArschatM5LiveContribution implements FrontendApplicationContributio
      * suspenders path ProviderSwitchService documents and the e-7 autotest uses.
      * All preference writes here use PreferenceScope.User (never Workspace).
      */
-    protected async pointAgentAtLmStudio(url: string, model: string): Promise<void> {
+    protected async pointAgentAtProvider(provider: ArschatProviderKind, url: string, model: string): Promise<void> {
         await this.preferenceService.ready;
         const existing = this.preferenceService.get<CustomOpenAiEntry[]>(OPENAI_CUSTOM_ENDPOINTS_PREF, []) ?? [];
         this.savedCustomEndpoints = JSON.parse(JSON.stringify(existing));
 
-        const updated = existing.map(e => e.id === LMSTUDIO_ID
+        const updated = existing.map(e => e.id === provider
             ? { ...e, url, model, enableStreaming: true }
             : e);
-        if (!updated.some(e => e.id === LMSTUDIO_ID)) {
-            updated.push({ id: LMSTUDIO_ID, model, url, enableStreaming: true, developerMessageSettings: 'system' });
+        if (!updated.some(e => e.id === provider)) {
+            updated.push({ id: provider, model, url, enableStreaming: true, developerMessageSettings: 'system' });
         }
         await this.preferenceService.set(OPENAI_CUSTOM_ENDPOINTS_PREF, updated, PreferenceScope.User);
-        this.log(`[M5-LIVE] lmstudio endpoint set: url='${url}' model='${model}'`);
+        this.log(`[M5-LIVE] provider='${provider}' endpoint set: url='${url}' model='${model}'`);
 
         // Give @theia/ai-openai's onPreferenceChanged a moment to re-register the model.
         await this.delay(1500);
         const models = await this.languageModelRegistry.getLanguageModels();
-        const lm = models.find(m => m.id === LMSTUDIO_ID);
-        this.log(`[M5-LIVE] LanguageModel '${LMSTUDIO_ID}' registered=${!!lm} (total models=${models.length})`);
+        const lm = models.find(m => m.id === provider);
+        this.log(`[M5-LIVE] LanguageModel '${provider}' registered=${!!lm} (total models=${models.length})`);
 
-        // Point the ArsChat agent at the lmstudio model (both paths, per §10 analysis).
-        const requirement: LanguageModelRequirement = { purpose: ARSCHAT_CHAT_PURPOSE, identifier: LMSTUDIO_ID };
+        // Point the ArsChat agent at the endpoint's model (both paths, per §10 analysis).
+        const requirement: LanguageModelRequirement = { purpose: ARSCHAT_CHAT_PURPOSE, identifier: provider };
         await this.settingsService.updateAgentSettings(ARSCHAT_CHAT_AGENT_ID, { languageModelRequirements: [requirement] });
         const agent = this.chatAgentService.getAgent(ARSCHAT_CHAT_AGENT_ID) as
             { languageModelRequirements?: LanguageModelRequirement[] } | undefined;
         if (agent) {
             agent.languageModelRequirements = [requirement];
         }
-        this.log(`[M5-LIVE] ArsChat agent pointed at LanguageModel id='${LMSTUDIO_ID}'`);
+        this.log(`[M5-LIVE] ArsChat agent pointed at LanguageModel id='${provider}'`);
         await this.delay(500);
     }
 

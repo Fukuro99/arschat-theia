@@ -1762,9 +1762,16 @@ export class ArschatChatWidget extends ReactWidget {
                             value={this.provider}
                             onChange={e => this.onProviderChange(e.target.value as ArschatProviderKind)}
                         >
-                            {PROVIDERS.map(p => (
-                                <option key={p.kind} value={p.kind}>{p.label}</option>
-                            ))}
+                            <optgroup label='クラウド'>
+                                {PROVIDERS.filter(p => !p.local).map(p => (
+                                    <option key={p.kind} value={p.kind}>{p.label}</option>
+                                ))}
+                            </optgroup>
+                            <optgroup label='ローカル'>
+                                {PROVIDERS.filter(p => p.local).map(p => (
+                                    <option key={p.kind} value={p.kind}>{p.label}</option>
+                                ))}
+                            </optgroup>
                         </select>
                         <select
                             id='arschat-model-select'
