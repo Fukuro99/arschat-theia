@@ -27,6 +27,15 @@ import { SkillService } from './skill-service';
 import { ArschatPersonaManagementWidget } from './persona-management-widget';
 import { ArschatPersonaManagementContribution } from './persona-management-contribution';
 import { ArschatM4AutotestContribution } from './arschat-m4-autotest-contribution';
+import { PreferenceContribution } from '@theia/core/lib/common/preferences';
+import { memoryPreferenceSchema } from './memory/memory-preferences';
+import { ArschatMemoryEnvironment } from './memory/memory-environment';
+import { ArschatMemoryService } from './memory/memory-service';
+import { ArschatMemoryServerContribution } from './memory/memory-server-contribution';
+import { ArschatMemoryCommands } from './memory/memory-commands';
+import { ArschatM16AutotestContribution } from './memory/memory-autotest';
+import { McpFrontendApplicationContribution } from '@theia/ai-mcp/lib/browser/mcp-frontend-application-contribution';
+import { ArschatMemoryMcpContribution } from './memory/memory-mcp-contribution';
 
 import '../../src/browser/style/index.css';
 
@@ -76,6 +85,14 @@ export class ArschatAgentsRegistrationContribution implements FrontendApplicatio
 }
 
 export function bindArschatAgents(bind: interfaces.Bind): void {
+    bind(PreferenceContribution).toConstantValue({ schema: memoryPreferenceSchema });
+    bind(ArschatMemoryEnvironment).toSelf().inSingletonScope();
+    bind(ArschatMemoryService).toSelf().inSingletonScope();
+    bind(ArschatMemoryServerContribution).toSelf().inSingletonScope();
+    bind(ArschatMemoryCommands).toSelf().inSingletonScope();
+    bind(CommandContribution).toService(ArschatMemoryCommands);
+    bind(ArschatM16AutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(ArschatM16AutotestContribution);
     bind(PersonaService).toSelf().inSingletonScope();
     bind(SkillService).toSelf().inSingletonScope();
     bind(ArschatChatAgent).toSelf().inSingletonScope();
@@ -97,6 +114,8 @@ export function bindArschatAgents(bind: interfaces.Bind): void {
     bind(FrontendApplicationContribution).toService(ArschatM4AutotestContribution);
 }
 
-export default new ContainerModule(bind => {
+export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     bindArschatAgents(bind);
+    // Both Theia's frontend and workspace-trust contribution aliases resolve this binding.
+    rebind(McpFrontendApplicationContribution).to(ArschatMemoryMcpContribution).inSingletonScope();
 });

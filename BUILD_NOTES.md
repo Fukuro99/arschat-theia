@@ -1251,3 +1251,47 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 - 検証結果: `npm --prefix arschat-extensions run build` green、`npm --prefix arschat-extensions test` は 5 suites / 21 tests green、`npm test` は `arschat-chat` 9 suites / 122 tests green (既存 React act warning は継続、exit code 0)、`npm run prepare` は `arschat-branding` / `arschat-providers` / `arschat-chat` / `arschat-agents` / `arschat-tools` / `arschat-extensions` すべて `tsc` green、`npm run build:browser` は browser rebuild + webpack 全段 `compiled successfully`、`npm run build:electron` は native rebuild (`drivelist` / `keytar` / `native-keymap`) + electron webpack 全段 `compiled successfully`。指揮側の browser-app 実機 (Claude Code 組み込みブラウザ) で `ARSCHAT_M14_AUTOTEST=1` を実行し、install-and-gate / spoof-rejected / dom-isolation / uninstall-cleans の 4 シナリオは PASS。manager-docked は 2 回計測 (旧レイアウト残存時 / localStorage 消去後のフレッシュ時) してどちらも FAIL。フレッシュ時でもペルソナビュー含む左パネル系ビューが一切生成されていないことを DOM 実測で確認しており、これは ms-14 の退行ではなく「browser-app が左パネル復元経路 (arschat-branding の `ArschatSideViewRestorer`) を含まない」構造由来 (ms-12 の Extensions ビュー検証も electron 実機で行われていた)。本命の electron-app では本修正 (electron-app への `arschat-extensions` 依存追加 + `ArschatSideViewRestorer` の対故障化) で復元経路が通る。
 - M14 autotest シナリオ: (1) inline manifest + HTML を `installFromData()` で autotest source として設置し、実 host widget の iframe 内 script から `storage.get` が ok、`storage.set` / `chat.send` が `PERMISSION_DENIED` になることを report で確認する。(2) 親 window から直接送った偽 `arschat-ext-request` に response が返らないことを確認する。(3) `ExtensionManagerWidget.ID` が左パネルに dock されていることを確認する。(4) sandbox iframe から `window.parent.document` へアクセスして `SecurityError` が出ることを確認する。(5) `uninstall()` 後に registry entry と `main.html` / `storage.json` / 拡張ディレクトリが消えることを確認する。
 - 実機確認できなかった項目 (ユーザー確認待ち): (1) electron-app 実機で左パネルに「ArsChat 拡張」ビューが dock されること (manager-docked 相当。browser-app は復元経路を持たないため構造的に検証不能)。(2) 権限確認ダイアログの実表示と、アプリ再起動後の承認保持。(3) 実在の GitHub リポジトリからの設置往復 (autotest は inline データで設置経路を検証しており、実ネットワークは fetch サービスの jest のみ)。
+
+## Phase 2 ms-16 実装メモ (sqgraph ユーザーメモリ)
+
+作業日: 2026-11-17 / 対象: `docs/briefs/MS16_BRIEF.md` の未コミット実装と初回・2巡目レビューの修正。コミットは行っていない。
+
+### 構成
+
+- `arschat-agents/src/browser/memory/` に preference、環境判定、MCP 登録・起動、想起・保存サービス、検索/自動保存切替コマンド、M16 autotest、回帰テストを配置。`poc-graphrag` は使用せず、sqgraph 本体は変更しない。
+- `ArschatChatAgent` はリクエストごとに最新発話から想起し、参考データとして persona の system prompt に追加する。想起全体は3秒で打ち切り、失敗時は空結果に縮退する。応答完了後の保存は await せず、キャンセル・エラー・mock・autotest は自動保存しない。チャットウィジェットは変更していない。
+- 保存は `add_memory` → アクティブな LanguageModel による JSON 抽出 → `commit_memory`。assistant の think とツール生データを除外する。通常 LLM に渡すメモリツールは search/get_entity のみ。
+- MCP 登録は Theia の `MCPFrontendService` / `MCPServerManager` を利用。Theia の `McpFrontendApplicationContribution` を派生クラスへ DI で差し替え、autotest の設定隔離を初回同期・自動起動より前に実施する。workspace trust の contribution alias も同じインスタンスを参照する。
+
+### レビュー対応・判断
+
+1. `readTools()` は Theia の `getFunction()` で個別に存在確認し、未登録ツールを省略する。実 `ToolInvocationRegistryImpl` と `AbstractChatAgent.invoke` を使う回帰テストで、MCP 未登録でも通常応答が完了することを確認した。
+2. 環境判定完了まではアクセスを禁止する。大文字・小文字を区別せず、いずれかの `ARSCHAT_*_AUTOTEST=1` で通常サーバーへの `call` / `recall` / `readTools` をサービス層で遮断する。M16 の専用名と隔離 HOME が揃う場合だけ、その専用サーバーへのアクセスを許可する。Theia の設定同期時にも sqgraph の通常名・別名/ラッパーコマンド・設定中のテスト名を除外し、既存の個人用定義を登録・自動起動しない。永続 preference は書き換えず、M16 は専用定義を直接登録する。sqgraph 以外の MCP 設定は通常の Theia 処理を維持する。
+3. `LanguageModelRequest.settings.stream=false` を抽出リクエスト（修正再試行も含む）に指定した。ローカル Theia 1.71.2 の `OpenAILanguageModel` は Chat Completions / Responses 両経路でこの設定を受け取り、非ストリーミングに分岐する。ArsChat が生成・更新する MCP `env` は `SQGRAPH_MEMORY_GROUP` / `SQGRAPH_MEMORY_HOME` だけとし、API キー・DB・extractor は入れない。M16 の extractor は CLI の `--extractor agent` で指定する。
+4. `pendingUpdate` はキュー処理開始時に取り出して消費する。登録/起動の await 中に届いた設定変更は次のキュー処理に残し、group の再変更が保存先へ反映される回帰テストを追加した。
+5. rebind した MCP contribution の `onStart` で sqgraph の preference 書き込みを完了してから親を呼び、親の初期 `prevServers` に含める。メモリ contribution の起動・終了もこの経路に一本化した。初期同期後の設定更新は、親の preference listener が他サーバーの起動待ちで未登録でも、親の `handleServerChanges` を通して登録と `prevServers` を一緒に更新する。通常サーバーの明示的な再登録は廃止し、メモリ設定変更では stop 完了後に preference を更新する。既存の手動定義と `autostart:false`、workspace trust は尊重する。
+6. Theia 同梱 Ajv で sqgraph が返す schema を検証し、entities の `ref/name/type`、facts の `subject/relation/fact` 必須条件も保証する。JSON/schema 違反または sqgraph の `invalid extraction` 等の commit 検証エラーに限り、前回出力と修正指示をモデルに渡して同じ token で1回だけ再試行する。両種類の失敗で再試行枠は共有する。通信エラーなど成功済みか不明な失敗は再試行しない。例外本文や token は独自ログに出さない。
+7. `environment.ready()` が失敗した場合は、メモリだけを無効化して固定文の warn ログを出す。親の `onStart` は必ず呼び、他 MCP の自動起動・設定変更・workspace roots・trust 監視を維持する。環境取得失敗を sqgraph 未インストールの通知には変換しない。
+
+### 既知事項
+
+- sqgraph は `SQGRAPH_MEMORY_DB` を HOME より優先する。M16 起動時に親環境に非空の DB 指定がある場合、隔離できない構成としてメモリの起動を拒否する（値はログに出さない）。環境取得に失敗した場合もメモリだけを無効化し、他の MCP の設定起動・監視は継続する。HOME は `THEIA_CONFIG_DIR/arschat/m16-memory-*` の実行ごとの専用ディレクトリ。
+- Theia の OpenAI ストリーミング実装が応答全文を `console.debug` するのは通常会話にも共通する本体仕様。抽出では対応経路に非ストリーミングを指定したが、他 provider がこの設定を無視する可能性まで一律に変更するものではない。独自ログは件数・時間・固定エラー文のみ。
+- Theia ai-mcp 本体の `mcp-server.ts` は起動時にサーバー定義の env をログ出力する。**ユーザーが手で `ai-features.mcp.mcpServers` の `env` に秘密を書くと、Theia がその秘密をログに出す。** ArsChat が自動生成する env に秘密情報は含めない。この項目は既知事項として記録し、Theia 本体や手動定義の保持に関するコード修正は行わない。
+- 実 MCP の Jest テストは opt-in (`ARSCHAT_M16_MCP_TEST_COMMAND`)。SDK の限定された既定環境と HOME/GROUP を使って一時ディレクトリに接続し、テスト終了時に client を閉じて、一時ディレクトリの場所を検証してから削除する。個人用 DB は使用しない。
+
+### 検証結果
+
+- `npm --prefix arschat-agents run build`: 成功、tsc エラー0。
+- `npm --prefix arschat-tools run build`: 成功、tsc エラー0。
+- `ARSCHAT_M16_MCP_TEST_COMMAND=C:\Users\takep\.local\bin\sqgraph-memory.exe` を設定したプロセスで `npm --prefix arschat-agents test -- --runInBand`: **12 suites / 111 tests、すべて成功**（実 MCP テストを含む）。通常実行では実 MCP 1件のみ opt-in のため skip。
+- `npm --prefix arschat-tools test -- --runInBand`: **13 suites / 102 tests 成功、1 suite / 2 tests は既存の skip**。終了コード0。
+- 実 MCP: ツール一覧 → add → 実 schema 検証 → 不正な参照の commit を拒否 → 同じ token の正常 commit → recall → 記憶ブロック整形と隔離 DB 作成を確認。実サーバーの検証エラー形式が修正再試行の判定に一致することも確認した。
+- 2巡目回帰テスト4件: 実 Theia contribution / frontend service / manager を使用し、SDK の接続だけを模擬。初期 preference 書き込みの完了前には親が登録しないこと、everything 起動待ち中の sqgraph 追加後に everything だけ変更しても sqgraph は接続1回・close 0回であること、メモリ設定変更は close 後に再登録されること、環境 RPC 失敗後も他 MCP の自動起動・設定追加・workspace roots・trust 取消/再許可が動くことを確認した。
+- `git diff --check`: 成功。新規 memory ソースの行末空白も検出なし。
+- ブリーフ §5 に従い、`build:electron` / `build:browser`、npm install は実行していない。node_modules / lib の手編集、git commit は行っていない（lib は指定された tsc build の出力のみ）。
+
+### 未確認事項
+
+- マージ後のアプリバンドル、Electron / browser 実機での `ARSCHAT_M16_AUTOTEST=1` の4シナリオ完走、既存 profile を使う起動・workspace trust・通知/QuickPick の表示確認。今回は禁止されたバンドルを実行せず、Theia の実 lifecycle メソッドを使うメモリ内テストと独立した実 MCP テストで検証した。
+- 実 LLM による抽出品質とモデル別の非ストリーミング対応、通常会話からの背景保存および次ターン想起の実 UI 往復。モデル呼び出しは Jest で模擬し、実 API への会話送信は行っていない。
