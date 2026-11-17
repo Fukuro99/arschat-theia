@@ -25,6 +25,9 @@
 | ms-13 | インタラクティブ UI (AI がチャット内に操作 UI を描画) |
 | ms-14 | 独自拡張 (サンドボックス iframe + 権限ゲート API) |
 | ms-15 | Explorer / Search / Outline の希釈解除 |
+| ms-16 | sqgraph によるユーザーメモリ (自動想起・自動保存。Phase 2 の中核) |
+| — | ローカル LLM プロバイダ追加 (Ollama / vLLM / llama.cpp / OpenAI 互換) |
+| — | VS Code 拡張のビューが希釈から漏れる問題の修正 (M6 シナリオ 2 が PASS に) |
 
 ## 未着手の開発
 
@@ -33,16 +36,13 @@
   - Theia 同梱の OS キーチェーン連携 (Windows 資格情報マネージャー / macOS Keychain / libsecret) に載せ替える。
   - 完了条件: Windows 実機で保存・読み出しが動く (他 OS は未検証で可、その旨を BUILD_NOTES に記録)。
   - 経緯: ms-6 のストレッチ e-8 として一度スキップした。SPEC は未作成。
-- [ ] **VS Code 拡張が出すビューが希釈から漏れる**
-  - `electron-app/plugins/` の GitLens のビュー 3 つと、GitLens が実行時に呼び込む scm-view-container が左パネルに出る。
-  - プラグイン由来のビューは FilterContribution (起動前除外) にも stale cleanup (初期化時走査) にも乗らないため、今の希釈の仕組みが構造的に効かない。
-  - M6 autotest のシナリオ 2 (activity bar) はこの影響で FAIL のまま。詳細は BUILD_NOTES の ms-11 実装メモ。
 
 ## 後続 Phase に回した機能
 
 [PHASE1_DESIGN.md](PHASE1_DESIGN.md) の非ゴールより。
 
-- [ ] **Phase 2**: ユーザーメモリ GraphRAG の本組み込み (`poc-graphrag` の製品化)、チャット内メモリ
+- [x] **Phase 2**: ユーザーメモリ — `poc-graphrag` ではなく [sqgraph](https://github.com/Fukuro99/sqgraph) を採用し ms-16 で実装済み
+- [ ] Phase 2 の残り: 記憶の一覧・編集 UI、ペルソナ別の記憶グループ、不要になった `poc-graphrag/` の削除
 - [ ] **Phase 3**: タスク機能 (自律エージェント)、ウィジェットモードの製品化 (PoC-1 コードの仕上げ)
 - [ ] 旧 ArsChat からのデータ移行ツール (セッション・設定のインポータ)
 - [ ] 配布 (electron-builder、自動アップデート)

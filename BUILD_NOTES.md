@@ -1319,3 +1319,24 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 
 - マージ後のアプリバンドル、Electron / browser 実機での `ARSCHAT_M16_AUTOTEST=1` の4シナリオ完走、既存 profile を使う起動・workspace trust・通知/QuickPick の表示確認。今回は禁止されたバンドルを実行せず、Theia の実 lifecycle メソッドを使うメモリ内テストと独立した実 MCP テストで検証した。
 - 実 LLM による抽出品質とモデル別の非ストリーミング対応、通常会話からの背景保存および次ターン想起の実 UI 往復。モデル呼び出しは Jest で模擬し、実 API への会話送信は行っていない。
+
+## 2026-11-17 統合ブランチの実機検証 (integration/2026-11-17)
+
+対象: ローカル LLM プロバイダ (90a8496) + プロバイダ設定のスコープ修正 (6e84bf0) + 拡張ビュー希釈 (d860b7a) + ms-16 ユーザーメモリ (a92ed7c)。
+`npm run prepare` と `npm run build:electron` は成功。Electron 実機を `THEIA_CONFIG_DIR=<一時dir>` + `ELECTRON_ENABLE_LOGGING=1` で起動し、renderer の console を stderr から回収した (frontend の console.log はこの環境変数が無いと stdout/stderr に出ない)。起動したプロセスツリーだけを PID 指定で終了する (`taskkill /IM electron.exe` は他の Electron アプリまで殺すので禁止)。
+
+| autotest | 接続先 | 結果 |
+|---|---|---|
+| `ARSCHAT_LOCAL_LLM_AUTOTEST=1` (`PROVIDER=vllm`, `URL=http://192.168.1.149:8000`) | Edge (edgexpert-0585) の vLLM `qwen3.8-flash-next` | **5 PASS / 0 FAIL** (endpoint / models / select / pong / japanese) |
+| `ARSCHAT_M5_LIVE=1` (`PROVIDER=vllm`) | 同上 | **4 PASS / 0 FAIL** (L1 read / L2 write 承認 / L3 write 拒否 / L5 run_command) |
+| `ARSCHAT_M16_AUTOTEST=1` | 一時 HOME の sqgraph-memory | **4 PASS / 0 FAIL** (server / save / recall / inject) |
+| `ARSCHAT_M6_AUTOTEST=1` | mock | **6 PASS / 0 FAIL**。ms-11 以来 FAIL だったシナリオ 2 (activity bar) も PASS |
+
+- 起動ログで `[arschat-dilution] plugin view container suppressed:` が GitLens の 4 コンテナ (`workbench.view.extension.gitlens` / `gitlensInspect` / `gitlensPatch` / `gitlensPanel`) と `scm` に出ることを確認。
+- 実機検証で見つかった不具合: `ProviderSwitchService.setActive` が scope 未指定で preference を書いており、Theia の既定 (Workspace) に書こうとして、フォルダ未オープン時に `Unable to write to Workspace Settings.` で失敗していた (フォルダを開いていればそのフォルダの `.theia/settings.json` に書かれていた)。6e84bf0 で User スコープに固定。
+- llama.cpp の `--reasoning-format deepseek` (既定) は思考を `reasoning_content` で返すが、Theia の OpenAI 互換経路は `reasoning` しか拾わないため思考が表示されない。llama.cpp は `--reasoning-format none` で起動し `<think>` を本文に流す運用にする (ArsChat 側が `<think>` を折りたたみ表示する)。vLLM の `reasoning` は Theia がそのまま思考として扱う。
+
+### 実機確認できなかった項目 (ユーザー確認待ち)
+- チャットヘッダーで「ローカル」グループから vLLM を選び、接続先 URL 欄に Edge の URL を入れて手で会話する操作 (autotest は同じ API を直接呼んでいる)。
+- Ollama / llama.cpp の実サーバーとの往復 (手元に起動中のサーバーが無いため未実施)。
+- 実際のユーザーメモリ DB での自動想起・自動保存 (autotest は一時 DB)。
