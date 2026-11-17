@@ -37,7 +37,7 @@
 // *****************************************************************************
 
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { Emitter, Event, ILogger, PreferenceService } from '@theia/core';
+import { Emitter, Event, ILogger, PreferenceScope, PreferenceService } from '@theia/core';
 import {
     AISettingsService,
     LanguageModel,
@@ -221,12 +221,12 @@ export class ProviderSwitchService {
     // on setActiveChain (doUpdateCustomEndpoint only reads/writes the preference),
     // so the two chains form a strict one-way dependency and cannot deadlock.
     protected async doSetActive(provider: ArschatProviderKind, model?: string): Promise<ArschatActiveSelection | undefined> {
-        await this.preferenceService.set(PREF_ACTIVE_PROVIDER, provider, undefined);
+        await this.preferenceService.set(PREF_ACTIVE_PROVIDER, provider, PreferenceScope.User);
         if (model !== undefined) {
             if (providerByKind(provider)?.fixedModelId) {
                 await this.updateCustomEndpointModel(provider, model);
             }
-            await this.preferenceService.set(PREF_ACTIVE_MODEL, model, undefined);
+            await this.preferenceService.set(PREF_ACTIVE_MODEL, model, PreferenceScope.User);
         }
         // Already ON the chain here: call the body directly. Going through the
         // queued applyActiveSelection() would await the chain's own tail = self-deadlock.
@@ -234,7 +234,7 @@ export class ProviderSwitchService {
     }
 
     async setActiveModel(model: string): Promise<ArschatActiveSelection | undefined> {
-        await this.preferenceService.set(PREF_ACTIVE_MODEL, model, undefined);
+        await this.preferenceService.set(PREF_ACTIVE_MODEL, model, PreferenceScope.User);
         return this.applyActiveSelection();
     }
 
@@ -423,7 +423,7 @@ export class ProviderSwitchService {
      * Serializes every read-modify-write of the shared customOpenAiModels
      * preference ARRAY. LM Studio and Unsloth both live in that one array, so two
      * concurrent updates (e.g. the widget's commit chains, which are per provider)
-     * would each read the old array and the later updateValue would silently
+     * would each read the old array and the later write would silently
      * revert the other provider's change (lost update). Chaining the whole
      * read -> merge -> write makes the writes strictly sequential.
      */
@@ -452,7 +452,7 @@ export class ProviderSwitchService {
         } else {
             updated.push(next);
         }
-        await this.preferenceService.updateValue(OPENAI_CUSTOM_ENDPOINTS_PREF, updated);
+        await this.preferenceService.set(OPENAI_CUSTOM_ENDPOINTS_PREF, updated, PreferenceScope.User);
         return next;
     }
 

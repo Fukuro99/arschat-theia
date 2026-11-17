@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { PreferenceScope } from '@theia/core';
 import { ArschatM2AutotestContribution } from 'arschat-providers/lib/browser/arschat-m2-autotest-contribution';
 import { ArschatLocalLlmAutotestContribution } from 'arschat-providers/lib/browser/arschat-local-llm-autotest-contribution';
 import {
@@ -16,8 +17,7 @@ describe.each(customEndpointProviders().map(provider => provider.kind))('M2 mode
         const service = new ProviderSwitchService() as any;
         service.preferenceService = {
             get: (key: string, fallback?: unknown) => preferences.has(key) ? preferences.get(key) : fallback,
-            set: jest.fn(async (key: string, value: unknown) => { preferences.set(key, value); }),
-            updateValue: jest.fn(async (key: string, value: unknown) => { preferences.set(key, value); })
+            set: jest.fn(async (key: string, value: unknown, _scope?: PreferenceScope) => { preferences.set(key, value); })
         };
         service.settingsService = { updateAgentSettings: jest.fn(async () => undefined) };
         service.languageModelRegistry = { getLanguageModels: jest.fn(async () => []) };

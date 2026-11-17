@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { PreferenceScope } from '@theia/core';
 import { ContainerModule, Container } from '@theia/core/shared/inversify';
 import { ApplicationShell } from '@theia/core/lib/browser';
 import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
@@ -809,7 +810,7 @@ describe('ArschatChatWidget', () => {
         const service = new ProviderSwitchService() as any;
         service.preferenceService = {
             get: (key: string, defaultValue?: unknown) => key === OPENAI_CUSTOM_ENDPOINTS_PREF ? stored : defaultValue,
-            updateValue: jest.fn((_key: string, value: any[]) => new Promise<void>(resolve => {
+            set: jest.fn((_key: string, value: any[], _scope?: PreferenceScope) => new Promise<void>(resolve => {
                 pendingWrites.push({ value, resolve: () => { stored = value; resolve(); } });
             }))
         };
@@ -849,10 +850,14 @@ describe('ArschatChatWidget', () => {
         const service = new ProviderSwitchService() as any;
         service.preferenceService = {
             get: (key: string, defaultValue?: unknown) => prefs.has(key) ? prefs.get(key) : defaultValue,
-            set: jest.fn((key: string, value: unknown) => new Promise<void>(resolve => {
+            set: jest.fn((key: string, value: unknown, _scope?: PreferenceScope) => new Promise<void>(resolve => {
+                if (key === OPENAI_CUSTOM_ENDPOINTS_PREF) {
+                    prefs.set(key, value);
+                    resolve();
+                    return;
+                }
                 pendingSets.push({ key, value, resolve: () => { prefs.set(key, value); resolve(); } });
-            })),
-            updateValue: jest.fn(async (key: string, value: unknown) => { prefs.set(key, value); })
+            }))
         };
         service.settingsService = { updateAgentSettings: jest.fn(async () => undefined) };
         service.languageModelRegistry = { getLanguageModels: jest.fn(async () => []) };
@@ -904,10 +909,9 @@ describe('ArschatChatWidget', () => {
         const service = new ProviderSwitchService() as any;
         service.preferenceService = {
             get: (key: string, defaultValue?: unknown) => prefs.has(key) ? prefs.get(key) : defaultValue,
-            set: jest.fn((key: string, value: unknown) => new Promise<void>(resolve => {
+            set: jest.fn((key: string, value: unknown, _scope?: PreferenceScope) => new Promise<void>(resolve => {
                 pendingSets.push({ key, value, resolve: () => { prefs.set(key, value); resolve(); } });
-            })),
-            updateValue: jest.fn(async (key: string, value: unknown) => { prefs.set(key, value); })
+            }))
         };
         service.settingsService = { updateAgentSettings };
         service.languageModelRegistry = { getLanguageModels: jest.fn(async () => []) };

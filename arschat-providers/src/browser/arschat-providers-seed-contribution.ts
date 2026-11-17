@@ -17,7 +17,7 @@
 
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { FrontendApplicationContribution } from '@theia/core/lib/browser';
-import { ILogger, PreferenceService } from '@theia/core';
+import { ILogger, PreferenceScope, PreferenceService } from '@theia/core';
 import {
     CustomOpenAiModelEntry,
     OPENAI_CUSTOM_ENDPOINTS_PREF,
@@ -58,7 +58,7 @@ export class ArschatProvidersSeedContribution implements FrontendApplicationCont
 
         const merged = [...existing, ...seeds];
         try {
-            await this.preferenceService.updateValue(OPENAI_CUSTOM_ENDPOINTS_PREF, merged);
+            await this.preferenceService.set(OPENAI_CUSTOM_ENDPOINTS_PREF, merged, PreferenceScope.User);
             this.logger.info(`[arschat-providers] seeded custom OpenAI endpoints: ${seeds.map(s => s.id).join(', ')}`);
         } catch (e: unknown) {
             this.logger.warn(`[arschat-providers] failed to seed custom endpoints: ${e instanceof Error ? e.message : String(e)}`);
