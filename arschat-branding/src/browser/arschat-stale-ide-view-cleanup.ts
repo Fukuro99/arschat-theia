@@ -30,6 +30,7 @@ import {
 } from '@theia/core/lib/browser';
 import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { SCM_VIEW_CONTAINER_ID } from '@theia/scm/lib/browser/scm-contribution';
+import { isPluginViewContainerAllowed } from './arschat-plugin-view-policy';
 
 /**
  * Substrings that only a still-diluted IDE side view (or the stock
@@ -47,6 +48,12 @@ export const STALE_IDE_VIEW_ID_PATTERNS: readonly string[] = [
 export function isStaleIdeViewId(id: string): boolean {
     if (id.startsWith('arschat')) {
         return false;
+    }
+    // ShellLayoutRestorer can recreate registered plugin containers without
+    // going through PluginViewRegistry.openViewContainer.
+    const pluginContainerPrefix = 'plugin-view-container:';
+    if (id.startsWith(pluginContainerPrefix)) {
+        return !isPluginViewContainerAllowed(id.slice(pluginContainerPrefix.length));
     }
     const lower = id.toLowerCase();
     return STALE_IDE_VIEW_ID_PATTERNS.some(p => lower.includes(p));
