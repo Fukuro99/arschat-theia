@@ -16,6 +16,8 @@
 import { ContainerModule } from '@theia/core/shared/inversify';
 import { FilterContribution } from '@theia/core';
 import { FrontendApplicationContribution } from '@theia/core/lib/browser';
+import { PluginViewRegistry } from '@theia/plugin-ext/lib/main/browser/view/plugin-view-registry';
+import { ArschatPluginViewRegistry } from './arschat-plugin-view-registry';
 import { ArschatMenuFilterContribution } from './arschat-ide-dilution';
 import { ArschatStaleIdeViewCleanup } from './arschat-stale-ide-view-cleanup';
 import { ArschatSideViewRestorer } from './arschat-extensions-view-restorer';
@@ -24,7 +26,12 @@ import { ArschatM15AutotestContribution } from './arschat-m15-autotest-contribut
 import { ArschatPoc3AutotestContribution } from './arschat-poc3-autotest-contribution';
 import { ArschatPoc4AutotestContribution } from './arschat-poc4-autotest-contribution';
 
-export default new ContainerModule(bind => {
+export default new ContainerModule((bind, _unbind, isBound, rebind) => {
+    // @theia/plugin-ext is a dependency and loads first. Its contribution's
+    // toService(PluginViewRegistry) alias follows this replacement singleton.
+    const bindPluginViewRegistry = isBound(PluginViewRegistry) ? rebind : bind;
+    bindPluginViewRegistry(PluginViewRegistry).to(ArschatPluginViewRegistry).inSingletonScope();
+
     // IDE-dilution: menu filtering (Selection/Go/Terminal). Status bar
     // visibility is handled declaratively via electron-app/package.json
     // `theia.frontend.config.preferences`, not here.

@@ -1251,3 +1251,27 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 - 検証結果: `npm --prefix arschat-extensions run build` green、`npm --prefix arschat-extensions test` は 5 suites / 21 tests green、`npm test` は `arschat-chat` 9 suites / 122 tests green (既存 React act warning は継続、exit code 0)、`npm run prepare` は `arschat-branding` / `arschat-providers` / `arschat-chat` / `arschat-agents` / `arschat-tools` / `arschat-extensions` すべて `tsc` green、`npm run build:browser` は browser rebuild + webpack 全段 `compiled successfully`、`npm run build:electron` は native rebuild (`drivelist` / `keytar` / `native-keymap`) + electron webpack 全段 `compiled successfully`。指揮側の browser-app 実機 (Claude Code 組み込みブラウザ) で `ARSCHAT_M14_AUTOTEST=1` を実行し、install-and-gate / spoof-rejected / dom-isolation / uninstall-cleans の 4 シナリオは PASS。manager-docked は 2 回計測 (旧レイアウト残存時 / localStorage 消去後のフレッシュ時) してどちらも FAIL。フレッシュ時でもペルソナビュー含む左パネル系ビューが一切生成されていないことを DOM 実測で確認しており、これは ms-14 の退行ではなく「browser-app が左パネル復元経路 (arschat-branding の `ArschatSideViewRestorer`) を含まない」構造由来 (ms-12 の Extensions ビュー検証も electron 実機で行われていた)。本命の electron-app では本修正 (electron-app への `arschat-extensions` 依存追加 + `ArschatSideViewRestorer` の対故障化) で復元経路が通る。
 - M14 autotest シナリオ: (1) inline manifest + HTML を `installFromData()` で autotest source として設置し、実 host widget の iframe 内 script から `storage.get` が ok、`storage.set` / `chat.send` が `PERMISSION_DENIED` になることを report で確認する。(2) 親 window から直接送った偽 `arschat-ext-request` に response が返らないことを確認する。(3) `ExtensionManagerWidget.ID` が左パネルに dock されていることを確認する。(4) sandbox iframe から `window.parent.document` へアクセスして `SecurityError` が出ることを確認する。(5) `uninstall()` 後に registry entry と `main.html` / `storage.json` / 拡張ディレクトリが消えることを確認する。
 - 実機確認できなかった項目 (ユーザー確認待ち): (1) electron-app 実機で左パネルに「ArsChat 拡張」ビューが dock されること (manager-docked 相当。browser-app は復元経路を持たないため構造的に検証不能)。(2) 権限確認ダイアログの実表示と、アプリ再起動後の承認保持。(3) 実在の GitHub リポジトリからの設置往復 (autotest は inline データで設置経路を検証しており、実ネットワークは fetch サービスの jest のみ)。
+## Plugin View 希釈漏れ修正 (PLUGIN_VIEW_BRIEF)
+
+作業日: 2026-11-17 / 対象: GitLens などのプラグイン経由で復活するサイドビューと永続レイアウト。
+
+- `ArschatPluginViewRegistry extends PluginViewRegistry` を追加し、`openViewContainer` だけを override。既定は全拒否、export した許可リストの `explorer` / `search` のみ親実装へ委譲する。拒否は `undefined` を返し、`[arschat-dilution] plugin view container suppressed: <id>` を registry インスタンス内で id ごとに一度だけ出す。判定・ログ済み集合は Theia 非依存の `arschat-plugin-view-policy.ts` に分離した。
+- frontend module は `isBound(PluginViewRegistry)` を確認して bind / rebind を選択し、置換先を singleton にする。`registerView` / `registerViewContainer` / データプロバイダ / webview resolver の登録処理は継承したまま。GitLens の blame・コマンド・ステータスバー・エディタ領域の webview の経路には変更を加えていない。
+- 復元後の左右サイドパネル掃除に `plugin-view-container:` の許可リスト判定を追加。`scm-view-container` は既存の `scm` 判定で引き続き close + dispose される。Explorer / Search と ArsChat のビューは保持し、エディタ領域は走査しない。
+- 個別の手動許可 UI は今回追加しない。**将来 Git UI を出すなら許可リストに追加**する。
+
+実装前の node_modules 裏取り (Theia 1.71.2):
+
+- `@theia/plugin-ext/lib/main/browser/view/plugin-view-registry.d.ts:86`: `openViewContainer(containerId: string): Promise<ViewContainerWidget | undefined>`。実装 `.js:548` も確認し、SCM が `scm.openView()` を直接呼ぶことを確認した。
+- 同 `.js` のコンストラクタは引数なし、依存は `@inject` のプロパティ注入、初期化は `@postConstruct init`。サブクラスではコンストラクタ・注入・初期化を上書きしていない。
+- `plugin-ext-frontend-module.js:222-223`: `bind(PluginViewRegistry).toSelf().inSingletonScope()` と `FrontendApplicationContribution.toService(PluginViewRegistry)`。既存 alias が置換先を参照する形を維持した。
+- branding の既存 `@theia/plugin-ext` 依存に加え、メイン checkout の既存 `electron-app/src-gen/frontend/index.js:142,151` を読み取り、plugin-ext → branding のロード順を確認した。なお browser-app は現状 branding を依存に含めていないため、その構成変更は本タスクの対象外。
+- `plugin-view-registry.js:738-739` のウィジェット ID 生成は `plugin-view-container:<id>`、`@theia/scm/lib/browser/scm-contribution.js:40` の ID は `scm-view-container`。
+
+検証結果:
+
+- `npm --prefix arschat-branding run build`: 成功、tsc エラー 0。
+- `npm --prefix arschat-branding test`: 2 suites / 33 tests 全成功。許可・既定拒否・ログ重複抑制・状態のインスタンス分離・復元 ID 選別・左右パネルの close/dispose と許可ビュー/エディタ保持を確認。
+- `npm --prefix arschat-chat test`: 9 suites / 122 tests 全成功。既存の React `act(...)` 警告あり、終了コード 0。
+- branding に最小の Jest 設定と setupFiles を追加。devDependencies は arschat-agents と同じ既存範囲を使用し、ルート実在バージョン (jest 29.7.0 / ts-jest 29.4.11 / @types/jest 29.5.14 / ts-node 10.9.2) で実行した。npm install と node_modules の変更はしていない。lib は手編集せず、指定の tsc による worktree 内生成のみ。
+- M6 autotest の期待値は変更していない。ブリーフ §4 に従い `build:electron` / `build:browser` は未実行。実機 M6 および GitLens 各機能の動作確認はマージ後のアプリ再バンドル時に行う項目として残る。コミットはしていない。
