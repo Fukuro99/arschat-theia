@@ -30,10 +30,13 @@
 // *****************************************************************************
 
 import { inject, injectable } from '@theia/core/shared/inversify';
-import { AbstractStreamParsingChatAgent, ChatAgentLocation, SystemMessageDescription } from '@theia/ai-chat/lib/common/chat-agents';
-import { LanguageModelRequirement, ToolRequest } from '@theia/ai-core';
+import { AbstractStreamParsingChatAgent, ChatAgentLocation, ChatSessionContext, SystemMessageDescription } from '@theia/ai-chat/lib/common/chat-agents';
+import { AIVariableContext, LanguageModel, LanguageModelMessage, LanguageModelRequirement, LanguageModelResponse, ToolRequest } from '@theia/ai-core';
+import { CodeChatResponseContent, MarkdownChatResponseContent, MutableChatRequestModel } from '@theia/ai-chat/lib/common/chat-model';
 import { ARSCHAT_CHAT_AGENT_ID, ARSCHAT_CHAT_PURPOSE } from 'arschat-providers/lib/browser/provider-switch-service';
 import { PersonaService } from './persona-service';
+import { ArschatMemoryService } from './memory/memory-service';
+import { isMockModel } from './memory/memory-utils';
 
 @injectable()
 export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
@@ -49,6 +52,11 @@ export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
 
     @inject(PersonaService)
     protected readonly personaService!: PersonaService;
+
+    @inject(ArschatMemoryService)
+    protected readonly memory!: ArschatMemoryService;
+
+    private readonly mockRequests = new WeakSet<MutableChatRequestModel>();
 
     /**
      * Non-readonly so ProviderSwitchService can rewrite it on provider switch.
@@ -74,9 +82,32 @@ export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
      * system prompt from PersonaService at send time, so persona switch/edit takes
      * effect immediately (no restart, no re-registration).
      */
-    protected override async getSystemMessageDescription(): Promise<SystemMessageDescription | undefined> {
+    protected override async getSystemMessageDescription(context: AIVariableContext): Promise<SystemMessageDescription | undefined> {
         await this.personaService.ready();
-        const text = this.personaService.getActiveEffectiveSystemPrompt();
-        return text ? { text } : undefined;
+        const persona = this.personaService.getActiveEffectiveSystemPrompt();
+        // The base class passes ChatSessionContext, including THIS request. No shared mutable recall state.
+        const query = ChatSessionContext.is(context) ? context.request?.request.text : undefined;
+        const text = persona + (query ? await this.memory.recallBlock(query) : '');
+        // Resolve at request time so late MCP registration and enabled changes are reflected immediately.
+        const functions = this.memory.readTools();
+        return text || functions.length ? { text, functionDescriptions: new Map(functions.map(tool => [tool.id, tool])) } : undefined;
+    }
+
+    protected override sendLlmRequest(request: MutableChatRequestModel, messages: LanguageModelMessage[], tools: ToolRequest[],
+        model: LanguageModel, promptVariantId?: string, customized?: boolean): Promise<LanguageModelResponse> {
+        // Check the actual selected model too: AISettingsService can override ProviderSwitchService.
+        if (isMockModel(model.id)) { this.mockRequests.add(request); }
+        return super.sendLlmRequest(request, messages, tools, model, promptVariantId, customized);
+    }
+
+    protected override async onResponseComplete(request: MutableChatRequestModel): Promise<void> {
+        await super.onResponseComplete(request);
+        if (request.response.isCanceled || request.response.isError || this.mockRequests.has(request)) { return; }
+        const assistant = request.response.response.content.flatMap(content => {
+            if (MarkdownChatResponseContent.is(content)) { return [content.content.value]; }
+            if (CodeChatResponseContent.is(content)) { return [content.code]; }
+            return []; // Exclude native thinking, tool arguments/results, errors and UI payloads.
+        }).join('\n');
+        void this.memory.save({ user: request.request.text, assistant, sessionId: request.session.id, requestId: request.id });
     }
 }
