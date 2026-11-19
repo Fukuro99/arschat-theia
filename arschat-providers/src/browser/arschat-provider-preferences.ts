@@ -75,7 +75,9 @@ export type ArschatProviderKind =
     | 'vllm'
     | 'llamacpp'
     | 'unsloth'
-    | 'openai-compatible';
+    | 'openai-compatible'
+    | 'codex-cli'
+    | 'claude-code-cli';
 
 /** One entry of the shared `ai-features.openAiCustom.customOpenAiModels` array. */
 export interface CustomOpenAiModelEntry {
@@ -110,6 +112,7 @@ export interface ArschatProviderDescriptor {
     readonly defaultApiKey?: string;
     /** True for the six local OpenAI-compatible endpoints (false/undefined for cloud ones). */
     readonly local?: boolean;
+    readonly group?: 'cli';
 }
 
 export const PROVIDERS: readonly ArschatProviderDescriptor[] = [
@@ -173,7 +176,9 @@ export const PROVIDERS: readonly ArschatProviderDescriptor[] = [
         fixedModelId: OPENAI_COMPATIBLE_ID,
         defaultUrl: OPENAI_COMPATIBLE_DEFAULT_URL,
         local: true
-    }
+    },
+    { kind: 'codex-cli', label: 'Codex (CLI)', modelIdFor: () => 'codex-cli', fixedModelId: 'codex-cli', group: 'cli' },
+    { kind: 'claude-code-cli', label: 'Claude Code (CLI)', modelIdFor: () => 'claude-code-cli', fixedModelId: 'claude-code-cli', group: 'cli' }
 ];
 
 export function providerByKind(kind: string): ArschatProviderDescriptor | undefined {
@@ -182,7 +187,7 @@ export function providerByKind(kind: string): ArschatProviderDescriptor | undefi
 
 /** The providers backed by an entry in the shared customOpenAiModels array, in display order. */
 export function customEndpointProviders(): readonly ArschatProviderDescriptor[] {
-    return PROVIDERS.filter(p => !!p.fixedModelId);
+    return PROVIDERS.filter(p => !!p.fixedModelId && p.group !== 'cli');
 }
 
 /** The default customOpenAiModels entry for a custom-endpoint provider (undefined for cloud ones). */

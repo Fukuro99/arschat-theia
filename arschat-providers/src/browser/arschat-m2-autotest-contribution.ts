@@ -86,13 +86,14 @@ export class ArschatM2AutotestContribution implements FrontendApplicationContrib
         }
 
         // ---- 2. per-provider live round-trip (or SKIP) ----
-        for (const p of PROVIDERS) {
+        // CLI runs have their own explicit ARSCHAT_CLI_AGENTS_AUTOTEST opt-in.
+        for (const p of PROVIDERS.filter(provider => provider.group !== 'cli')) {
             await this.liveTestProvider(p.kind, models);
         }
 
         // ---- 3. switch exercise ----
         console.log('[M2][autotest] --- switch exercise ---');
-        for (const p of PROVIDERS) {
+        for (const p of PROVIDERS.filter(provider => provider.group !== 'cli')) {
             // Pick an actual model name; custom endpoint IDs only identify the LanguageModel.
             const modelName = await this.pickModelName(p.kind, models);
             const selection = await this.switchService.setActive(p.kind, modelName);
@@ -106,6 +107,7 @@ export class ArschatM2AutotestContribution implements FrontendApplicationContrib
 
     protected async pickModelName(kind: ArschatProviderKind, models: LanguageModel[]): Promise<string | undefined> {
         const provider = PROVIDERS.find(p => p.kind === kind);
+        if (provider?.group === 'cli') { return kind; }
         if (provider?.fixedModelId) {
             const configuredModel = this.switchService.getCustomEndpointModel(kind);
             if (configuredModel && configuredModel !== 'local-model') {

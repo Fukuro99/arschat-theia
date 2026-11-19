@@ -110,7 +110,8 @@ describe('ProviderSwitchService local LLM providers', () => {
     });
 
     it('lists the eight providers in the documented order, custom-endpoint ones in seed order', () => {
-        expect(PROVIDERS.map(p => p.kind)).toEqual([
+        // Keep the original cloud/local contract; the CLI inventory has its own exact-order test.
+        expect(PROVIDERS.filter(p => p.group !== 'cli').map(p => p.kind)).toEqual([
             'anthropic', 'openai', 'lmstudio', 'ollama', 'vllm', 'llamacpp', 'unsloth', 'openai-compatible'
         ]);
         expect(customEndpointProviders().map(p => p.kind)).toEqual([

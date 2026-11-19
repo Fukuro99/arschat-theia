@@ -1394,3 +1394,171 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 
 - autotest 後に `cmdkey /list` に `arschat` のエントリが残っていないことを確認。
 - 実機確認できなかった項目 (ユーザー確認待ち): 「API キー」ダイアログでの実キー保存 → アプリ再起動 → そのキーで Anthropic / OpenAI が応答すること。既存の平文キーが入った実プロファイルでの移行。
+
+## CLI エージェントプロバイダ実装 (2026-11-19)
+
+対象: `docs/briefs/CLI_AGENTS_BRIEF.md`。ブランチ `feat/cli-agent-providers`。コミット・npm install・node_modules の編集・lib の手編集は行っていない（lib は指定 build の生成物のみ）。
+
+### 裏取り・構成
+
+- ローカル Theia の `ai-core/lib/common/language-model.d.ts`、`ai-core/lib/node/ai-core-backend-module.js`、backend/frontend registry と delegate、および `ai-openai/lib/node/openai-language-model.js` を確認。backend の `LanguageModelProvider` contribution で `codex-cli` / `claude-code-cli` を登録し、`LanguageModelStreamResponse.stream` の AsyncIterable から `{ content }` / `{ thought, signature }` を返す。
+- 設定は frontend の ArsChat agent が毎回 preference と workspace roots を読み、`UserRequest.settings.arschatCliAgents` にスナップショットとして渡す。backend にユーザー間共有の可変設定は置かない。作業ディレクトリは明示設定 → 最初の file workspace root → Theia config dir 配下 `arschat/cli-agents`（必要なら作成）の順。
+- `claude --help` / `codex exec --help` を実行し、`claude --version` = **2.1.273**、`codex --version` = **0.162.1** を確認。Codex は `exec --json --skip-git-repo-check --ephemeral -s <mode> [-m <model>] -`。両 CLI とも履歴全文を stdin に送る。作業ディレクトリは spawn の cwd で渡す。
+- [Codex の公式非対話実行ドキュメント](https://learn.chatgpt.com/docs/non-interactive-mode)で `item.*` / `turn.failed` / `error` と item 種別を確認。[Claude の公式 headless ドキュメント](https://code.claude.com/docs/en/headless)で `stream-json` / `text_delta` / 最終 `result`、および `--bare` の認証動作を確認。
+- **ヘルプとの差分**: この Claude 版の通常権限モードは `manual`。設定の公開値は `plan` / `acceptEdits` / `default` / `bypassPermissions`、`default` だけ起動時に `manual` に変換する。Codex は `read-only` / `workspace-write` / `danger-full-access`。ユーザー決定で無制限モードを選択可能に変更したが、既定は `plan` / `read-only` を維持。未許可の値は backend でも安全側の既定値へ戻す。
+- Windows の実際の npm `.cmd` を読み、Codex は JS エントリ、Claude はネイティブ exe エントリであることを確認。ランチャーは cwd と相対パスを除いた PATH と npm シムの `%dp0%` エントリを解決し、Node または exe を `shell: false` / `windowsHide: true` で直接起動する。任意のバッチスクリプトは実行せずエラーにする。JS シムは実行中のランタイムの絶対パス `process.execPath` を使い、Electron の場合は子環境へ `ELECTRON_RUN_AS_NODE=1` を設定する。
+- Codex の reasoning を思考、agent_message を本文、command_execution / file_change をコマンド・対象パスだけの短い操作要約に変換。Claude は message ID + content block index 単位で text/thinking の累積を assistant の完全版と照合し、末尾の欠落を補完する。result は最後の本文ブロックと照合する。壊れた JSONL 行があっても完全版で復元できれば続行し、途中の欠落など復元不能な不一致や完了通知のない終了はエラーとする。キャンセル・タイムアウト・ストリーム消費中止・プロセス異常終了では子プロセスツリー終了を試みる（Windows: `%SystemRoot%\System32\taskkill.exe /T /F /PID`、POSIX: 独立プロセスグループ）。パイプを destroy し、タイマーとキャンセル購読を解放する。
+- ヘッダーに「クラウド」「ローカル」「エージェント (CLI)」の3グループを表示。CLI は custom endpoint、URL 欄、ライブモデル取得、seed の対象外。選択時に専用 RPC で `--version` を確認し、未導入・キー未設定の案内をヘッダー下の1行に表示する。省略された全文は tooltip で確認できる。古い非同期チェック結果は破棄する。
+
+### 認証・制約
+
+- Claude のキーは backend の `KeyStoreService.getPassword('arschat', 'anthropic')` を優先し、未設定／金庫エラーなら backend の `ANTHROPIC_API_KEY` にフォールバック。両方なければ指定の案内文を返し、`--version` も含め Claude を起動しない。
+- 両 CLI の子環境は OS・ランタイム・ロケール・プロキシ・追加 CA 証明書の明示的な許可リストから構築する。Claude には選択した `ANTHROPIC_API_KEY` だけを認証変数として追加し、`ANTHROPIC_*` / `CLAUDE_*` / `AWS_*` / `GOOGLE_*` 等の親環境は引き継がない。さらに `--bare` を維持し、保存済み OAuth・CLI のシステム金庫へのフォールバックを防ぐ。キーは argv / RPC / preference / ログへ載せない。本文と思考はそれぞれストリーム全体で伏せ字にし、秘密の接頭辞に一致する末尾を次の断片まで保留する。stderr は消費するだけで記録せず、プロセス・プロトコル例外は固定メッセージに置換する。
+- Codex には追加で `CODEX_HOME` を許可し、`OPENAI_API_KEY` は渡さない。ログインファイルやトークンは読み取らず、CLI 自身の ChatGPT ログインを利用する。
+- 会話は毎回独立したテキスト履歴。セッション再開は使用しない。画像の URL/base64 は送らず、トランスクリプトと応答本文に未対応の注記を付ける。ArsChat の `request.tools` は CLI に渡さないため、CLI 操作は ArsChat のツール確認 UI や tool-call 履歴としては表示されない。
+- Claude の `--bare` は hooks、plugins、MCP、CLAUDE.md 等の自動探索も無効にする。権限モードと組み込み CLI ツールは使用する。Codex は自身の構成とプロジェクト設定を読み得る。ArsChat の会話だけで CLI の挙動すべてを規定するものではない。
+- `ARSCHAT_CLI_AGENTS_AUTOTEST=1` 専用 contribution を追加。Codex PONG、日本語の東京、Claude の PONG またはキー必須案内を ChatService 経由で確認し、`[CLI-AGENTS][autotest] SUMMARY` を出力、元の選択へ復帰する。既存 M2 autotest の推論／切替ループから CLI を除外し、専用 opt-in でのみ実機テストする。
+
+### 追加テストと結果
+
+- **35件追加**: backend/protocol/process/autotest 29件、ヘッダー3件、backend contribution/RPC の DI 1件、agent の設定・workspace・履歴・ツール非転送2件。
+- `child_process.spawn` は chat の Jest setup で常に禁止し、CLI テストだけ synthetic child に置換。実 CLI は Jest から一切起動していない。実 keytar 禁止の setup は維持。
+- 既存テストの期待値は維持。従来8プロバイダの順序テストは対象を従来の cloud/local に限定し、別の新規テストで CLI を含む全10プロバイダの順序を厳密に検証。追加 DI に必要な fixture のみ補った。
+
+| コマンド | 結果 |
+|---|---|
+| `npm --prefix arschat-providers run build` | PASS、tsc エラー0 |
+| `npm --prefix arschat-chat run build` | PASS、tsc エラー0 |
+| `npm --prefix arschat-agents run build`（変更した依存パッケージも追加確認） | PASS、tsc エラー0 |
+| `npm --prefix arschat-chat test -- --runInBand` | 14 suites / 263 tests PASS |
+| `npm --prefix arschat-agents test -- --runInBand` | 12 suites / 116 tests PASS、既存 integration 1 suite / 1 test SKIP |
+| `npm --prefix arschat-tools test -- --runInBand` | 13 suites / 102 tests PASS、既存 live network 1 suite / 2 tests SKIP |
+| `npm --prefix arschat-branding test -- --runInBand` | 2 suites / 33 tests PASS |
+| `npm --prefix arschat-extensions test -- --runInBand` | 5 suites / 21 tests PASS |
+
+全5パッケージ合計: **46 suites / 535 tests PASS、失敗0、既存の条件付きSKIP 3 tests**。chat の Jest は React の act 警告を出すが、テスト失敗はない。
+
+### 既知事項・未確認事項
+
+- ブリーフ §5 の分担通り、アプリの bundle と実機 `ARSCHAT_CLI_AGENTS_AUTOTEST=1` は未実施。実ログイン済み Codex の応答、日本語、API キー付き Claude の応答、実プロセスツリー終了と実 UI の見た目は指揮側の確認対象。
+- Windows シム解決、プロセス終了、設定転送、エラー・キャンセル・タイムアウトは Jest のモックで検証。実際の推論 CLI は実行していない（この作業で実行した CLI は help/version のみ）。別バージョンの `--bare` / `manual` 対応、POSIX 上の実プロセス終了、任意のカスタムランチャーとの互換性は未確認。
+- Windows では、キャンセル・タイムアウトなど親が生きている間はツリーごと終了できるが、CLI 本体が先に異常終了した場合に孫プロセスが残る可能性がある。Node 単体では Job Object を作れないため、本実装では親消滅後の子孫追跡は行わない。2巡目レビューの should-fix は依頼に従い既知事項として明記し、コード対応は行わない。
+
+### 変更ファイル一覧
+
+- `BUILD_NOTES.md`
+- `arschat-providers/src/common/cli-agents.ts`（新規）
+- `arschat-providers/src/node/cli-agent-process.ts`（新規）
+- `arschat-providers/src/node/cli-agent-protocol.ts`（新規）
+- `arschat-providers/src/node/cli-agent-service.ts`（新規）
+- `arschat-providers/src/node/arschat-providers-backend-module.ts`
+- `arschat-providers/src/browser/cli-agent-preferences.ts`（新規）
+- `arschat-providers/src/browser/cli-agent-autotest-contribution.ts`（新規）
+- `arschat-providers/src/browser/arschat-provider-preferences.ts`
+- `arschat-providers/src/browser/arschat-providers-frontend-module.ts`
+- `arschat-providers/src/browser/provider-switch-service.ts`
+- `arschat-providers/src/browser/arschat-m2-autotest-contribution.ts`
+- `arschat-agents/src/browser/arschat-chat-agent.ts`
+- `arschat-agents/src/browser/cli-agent-request.test.ts`（新規）
+- `arschat-agents/configs/jest-setup.js`
+- `arschat-chat/src/browser/arschat-chat-widget.tsx`
+- `arschat-chat/src/browser/style/index.css`
+- `arschat-chat/src/browser/arschat-cli-agents.test.ts`（新規）
+- `arschat-chat/src/browser/arschat-chat-widget.test.ts`
+- `arschat-chat/src/browser/arschat-keychain-status.test.ts`
+- `arschat-chat/src/browser/arschat-local-llm-providers.test.ts`
+- `arschat-chat/src/browser/arschat-secrets.test.ts`
+- `arschat-chat/configs/jest-setup.js`
+
+作業開始時から未追跡だった `.claude/` と `docs/briefs/CLI_AGENTS_BRIEF.md` は変更していない。
+
+### CLI レビュー修正（2026-11-19）
+
+- blocker 3件・should-fix 3件に対応。nit は依頼通り対象外。
+- `cli-agent-env.ts` に許可リスト、`cli-agent-redactor.ts` にストリーム伏せ字処理を分離。許可変数と拒否する認証・ランタイム注入変数、キーの全分割境界、本文と思考の交互出力をテストで固定した。
+- npm JS シムは `process.execPath`、Windows の終了処理は `%SystemRoot%\System32\taskkill.exe` を使う。cwd・相対 PATH・作業ディレクトリ内の偽 `node.exe` / `taskkill.exe` を使わないことと、Electron の Node モードを検証した。
+- 起動直後の PID を保持し、異常な close/exit/error では close 待ちをせずツリー終了とパイプ破棄を実行。taskkill の失敗は詳細や秘密を含まない固定ログを出し、直接 kill も試す。Windows で親 PID が既に消滅している場合、taskkill による子孫の終了は保証できない。この実装は指定方針の終了試行であり、Job Object による追跡は行わない。
+- 独自 AsyncIterator の `return()` から直ちに停止・キュー破棄・全 next 待機解除を行う。最初の next 前と next 待機中の両方を検証した。
+- Claude は message_start / assistant のメッセージ ID を区切りとして累積を照合し、完全版の不足分だけを追加。複数メッセージ、壊れた行からの本文・思考復元、復元不能時のエラー、result の重複防止を検証した。
+- CLI テストは **29件 → 54件（25件追加）**。実 CLI・実金庫を使わない既存の Jest 設定を維持。
+
+| 検証 | 結果 |
+|---|---|
+| providers / chat / agents の `npm --prefix <package> run build` | 全て PASS |
+| chat の Jest | 14 suites / 288 tests PASS |
+| agents の Jest | 12 suites / 116 tests PASS、既存 1 test SKIP |
+| tools の Jest | 13 suites / 102 tests PASS、既存 2 tests SKIP |
+| branding の Jest | 2 suites / 33 tests PASS |
+| extensions の Jest | 5 suites / 21 tests PASS |
+
+全 Jest パッケージ合計 **46 suites / 560 tests PASS、失敗0、既存の条件付き SKIP 3 tests**。providers は Jest スクリプトを持たず、CLI backend のテストは chat から実行。`git diff --check` も成功。実 CLI 推論・実プロセスツリー終了・アプリ bundle / autotest は今回未実施。レビュー原文は読み取りのみ、コミットは行っていない。
+
+### CLI 2巡目レビュー修正（2026-11-19）
+
+- Claude の照合を message ID + content block index 単位に変更。[公式 message flow](https://code.claude.com/docs/en/agent-sdk/streaming-output#message-flow) の通り、各 `assistant` を対応するブロックの完全版として扱う。本文と `tool_use` が同じ ID で順に届いても、それ以前の本文との不一致にはしない。本文・思考の末尾補完と最終 result の重複防止を維持。
+- 「本文 delta → 本文 assistant → 同じ ID の tool_use assistant → 次の本文」の回帰テストを追加。同じ ID の次ブロックと、ツール実行後の新しい ID の両方を通し、正常完了・本文の欠落なし・重複なしを確認。同一内容の別 index の本文を省略しないこと、思考の独立した補完、ツール完全版が未復元の本文を検証済みにしないことも確認。
+- `taskkill` の失敗処理に一度だけのガードを追加。`close` 単独の失敗と `error → close` の双方で、固定警告とフォールバック kill が各1回となることを確認。
+- 親消滅後の孫プロセスは依頼通りコード対応せず、上記の既知事項へ明記。レビュー原文は読み取りのみ。コミットは行っていない。
+
+| 検証 | 結果 |
+|---|---|
+| providers / chat / agents の `npm --prefix <package> run build` | 全て PASS |
+| chat の Jest | 14 suites / 293 tests PASS（CLI テストは 54 → 59件） |
+| agents の Jest | 12 suites / 116 tests PASS、既存 1 test SKIP |
+| tools の Jest | 13 suites / 102 tests PASS、既存 2 tests SKIP |
+| branding の Jest | 2 suites / 33 tests PASS |
+| extensions の Jest | 5 suites / 21 tests PASS |
+
+全 Jest パッケージ合計 **46 suites / 565 tests PASS、失敗0、既存の条件付き SKIP 3 tests**。各パッケージは `npm --prefix <package> test -- --runInBand` で実行。ログは `%TEMP%/arschat-cli-review2-<chat|agents|tools|branding|extensions>-jest.log`。`git diff --check` も成功。実 CLI 推論・実プロセスツリー終了・アプリ bundle / autotest は今回未実施。
+
+### CLI 3巡目レビュー修正・権限モード選択（2026-11-19）
+
+- should-fix 2件を修正。Claude の破損状態を各 content block に保持し、別の tool_use / 本文の完全版では解除しない。本文・思考が空のまま破損した場合も、復元されないまま次のメッセージや正常完了へ進むことを防ぐ。
+- `content_block_stop` で終了状態を記録してアクティブな照合先を解除する。次のブロックの start / delta が壊れていても、その assistant 完全版は新規ブロックへ復元する。同じ本文が連続する場合も省略しない。本文・思考の破損、同一／異なる本文の復元、同じブロックの完全版での復旧を回帰テストに追加した。
+- ユーザー決定に従い、ブリーフ §0 / §2-2 / §6 の無制限モード除外を撤回。`claude --help` と `codex exec --help` を再実行し、Codex の `read-only` / `workspace-write` / `danger-full-access`、Claude の `plan` / `acceptEdits` / `manual` / `bypassPermissions` を確認した。Claude の公開設定 `default` → CLI `manual` 変換を維持する。
+- preference schema と backend の正規化で同じ許可リストを使用。既定は Codex `read-only` / Claude `plan` のまま、未知の値もこの既定へ戻す。
+- CLI 選択時だけ、ヘッダーのモデル選択の右に「権限」を表示する。変更は User スコープに保存し、設定画面などからの変更も表示へ反映する。無制限モードへの変更は Theia `ConfirmDialog` でファイル削除・コマンド実行が確認なしで行われ得る旨を表示し、承認時だけ保存する。キャンセル時は元の値を維持し、他の値への変更は即時保存する。無制限モード中は select を警告色にして title でも説明する。
+- 選択肢・既定値・backend 許可リスト、全非 CLI プロバイダでの非表示、CLI ごとの表示位置、確認のキャンセル／承認・User 保存・警告表示をテストで検証。今回の追加は **37 tests**（CLI 20件、ヘッダー17件）。実 CLI・実金庫を呼ばない Jest 設定を維持。
+
+| 検証 | 結果 |
+|---|---|
+| providers / agents / chat の `npm --prefix <package> run build` | 全て PASS、tsc エラー0 |
+| chat の Jest | 14 suites / 330 tests PASS |
+| agents の Jest | 12 suites / 116 tests PASS、既存 1 test SKIP |
+| tools の Jest | 13 suites / 102 tests PASS、既存 2 tests SKIP |
+| branding の Jest | 2 suites / 33 tests PASS |
+| extensions の Jest | 5 suites / 21 tests PASS |
+
+全 Jest パッケージ合計 **46 suites / 602 tests PASS、失敗0、既存の条件付き SKIP 3 tests**。providers は Jest スクリプトを持たず、backend のテストは chat から実行。ログは `%TEMP%/arschat-cli-review3-<chat|agents|tools|branding|extensions>-jest.log`。`git diff --check` も成功。chat の既存 React act 警告は残る。実 CLI 推論・実プロセスツリー終了・アプリ bundle / autotest・実 UI の見た目は今回未確認。レビュー原文は読み取りのみ、git commit は行っていない。
+
+### CLI 4巡目レビュー修正（2026-11-19）
+
+- 設定画面での権限モード変更はユーザーが明示的に設定を変える操作であるため、ユーザー決定に従い確認ダイアログは追加しない。`arschat.cliAgents.codex.sandbox` / `arschat.cliAgents.claudeCode.permissionMode` の `markdownDescription` に、それぞれ `danger-full-access` / `bypassPermissions` は CLI がファイル削除・コマンド実行を確認なしで行える旨を明記した。既存のヘッダーの確認ダイアログは維持する。
+- Codex / Claude 共通で、空行を除く stdout の行を JSON として解釈できなければ、その場で対象の子プロセスツリー終了を試行し、パイプを破棄して「CLI の出力を解釈できませんでした」の固定エラーで終了する。同じチャンク内の後続の完全版・完了通知で成功へ戻すことはない。パイプのチャンク境界で分割された行は引き続き改行まで蓄積し、改行のない最終行も終了時に解析する。
+- `damaged` / `pendingDamage` と破損後の復元テストを撤去。Claude のブロック照合は、累積 delta が完全版の先頭と一致する場合に末尾の不足分だけを補完し、一致しない場合はエラーにする。本文・思考の照合、ブロック index とメッセージ ID の区別、最終 result の重複防止は維持した。
+- 不正 JSON 行での即時エラーと対象 PID の終了・パイプ破棄・タイマー解除、改行のない不正な最終行を両 CLI で検証。末尾欠落の補完、補完不能時のエラー、本文→tool_use→本文の通常フロー（同じ／新しいメッセージ ID）も確認した。
+
+| 検証 | 結果 |
+|---|---|
+| providers / agents / chat の `npm --prefix <package> run build` | 全て PASS、tsc エラー0 |
+| chat の Jest | 14 suites / 327 tests PASS |
+| agents の Jest | 12 suites / 116 tests PASS、既存 1 test SKIP |
+| tools の Jest | 13 suites / 102 tests PASS、既存 2 tests SKIP |
+| branding の Jest | 2 suites / 33 tests PASS |
+| extensions の Jest | 5 suites / 21 tests PASS |
+
+全 Jest パッケージ合計 **46 suites / 599 tests PASS、失敗0、既存の条件付き SKIP 3 tests**。各パッケージは `npm --prefix <package> test -- --runInBand` で実行。providers は Jest スクリプトを持たず、backend のテストは chat から実行。ログは `%TEMP%/arschat-cli-review4-<chat|agents|tools|branding|extensions>-jest.log`。`git diff --check` も成功。実 CLI 推論・実プロセスツリー終了・アプリ bundle / autotest・実 UI は今回未確認。レビュー原文は読み取りのみ、git commit は行っていない。
+
+### 実機検証 (2026-11-19)
+
+`npm run prepare` / 全パッケージ jest (599 PASS、既存スキップ 3) / `npm run build:electron` 成功後、Electron 実機 (`THEIA_CONFIG_DIR=<一時dir>`) で確認。
+
+| autotest | 結果 |
+|---|---|
+| `ARSCHAT_CLI_AGENTS_AUTOTEST=1` | **3 PASS / 0 FAIL**。実際の `codex` (ChatGPT ログイン) で PONG と日本語 (東京)。Claude Code は API キー未保存・`ANTHROPIC_API_KEY` 未設定の環境で、CLI を起動せず「API キーが必要」の案内を返すことを確認 |
+| `ARSCHAT_LOCAL_LLM_AUTOTEST=1` (Edge の vLLM) | 5 PASS / 0 FAIL (退行なし) |
+| `ARSCHAT_M6_AUTOTEST=1` | 6 PASS / 0 FAIL (退行なし) |
+
+Codex レビューは 5 巡で収束 (blocker 4 / should-fix 9 を修正)。判断で残した既知事項: 親 (CLI 本体) が先に異常終了した場合の孫プロセス残存 (Node 単体で Job Object を作れないため)、設定画面からの無制限モード選択は確認ダイアログなし (説明欄に警告)。
+
+実機確認できなかった項目 (ユーザー確認待ち): Anthropic API キーを保存した状態での Claude Code (CLI) の実応答、ヘッダーの「権限」select と無制限モードの確認ダイアログの目視、workspace-write / acceptEdits でのファイル編集の往復。

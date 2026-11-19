@@ -29,6 +29,7 @@
 | ms-16 | sqgraph によるユーザーメモリ (自動想起・自動保存。Phase 2 の中核) |
 | — | ローカル LLM プロバイダ追加 (Ollama / vLLM / llama.cpp / OpenAI 互換) |
 | — | VS Code 拡張のビューが希釈から漏れる問題の修正 (M6 シナリオ 2 が PASS に) |
+| — | Claude Code / Codex を公式 CLI 経由で呼ぶプロバイダ (Codex は ChatGPT ログイン、Claude Code は Anthropic API キー。権限モードはヘッダーで切替) |
 
 ## 未着手の開発
 

@@ -22,6 +22,7 @@ import { ArschatApiKeysDialogService } from './arschat-api-keys-dialog';
 import { injectable, postConstruct, inject } from '@theia/core/shared/inversify';
 import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
 import { ApplicationShell, type Message } from '@theia/core/lib/browser';
+import { ConfirmDialog } from '@theia/core/lib/browser/dialogs';
 import { DisposableCollection } from '@theia/core';
 import { CommandRegistry } from '@theia/core/lib/common/command';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
@@ -60,6 +61,9 @@ import {
     PROVIDERS
 } from 'arschat-providers/lib/browser/arschat-provider-preferences';
 import { ProviderSwitchService, ARSCHAT_CHAT_AGENT_ID } from 'arschat-providers/lib/browser/provider-switch-service';
+import { CliAgentService, isCliAgent, CLI_PREF, CODEX_SANDBOX_MODES, CLAUDE_PERMISSION_MODES } from 'arschat-providers/lib/common/cli-agents';
+import { PreferenceService, PreferenceScope } from '@theia/core';
+import { CLI_PREFERENCE_KEYS, readCliSettings } from 'arschat-providers/lib/browser/cli-agent-preferences';
 import { PersonaService } from 'arschat-agents/lib/browser/persona-service';
 import { SkillService } from 'arschat-agents/lib/browser/skill-service';
 import { Persona } from 'arschat-agents/lib/common/persona';
@@ -232,6 +236,11 @@ export class ArschatChatWidget extends ReactWidget {
     protected dragActive = false;
 
     protected provider: ArschatProviderKind = 'anthropic';
+    @inject(CliAgentService) protected readonly cliAgentService!: CliAgentService;
+    @inject(PreferenceService) protected readonly preferenceService!: PreferenceService;
+    protected cliAgentNotice = '';
+    protected cliCheckSequence = 0;
+    protected cliPermissionPending = false;
     protected model = '';
     protected modelsByProvider: Map<ArschatProviderKind, LanguageModel[]> = new Map();
     protected configuredCustomModelsByProvider: Map<ArschatProviderKind, string> = new Map();
@@ -296,7 +305,13 @@ export class ArschatChatWidget extends ReactWidget {
         this.toDispose.push(this.switchService.onDidChange(sel => {
             this.provider = sel.provider;
             this.model = sel.model;
+            void this.checkCliAgent();
             this.update();
+        }));
+        void this.checkCliAgent();
+
+        this.toDispose.push(this.preferenceService.onPreferenceChanged(event => {
+            if (event.preferenceName.startsWith(CLI_PREF)) { this.update(); }
         }));
 
         // History-panel-driven session control.
@@ -393,14 +408,33 @@ export class ArschatChatWidget extends ReactWidget {
     protected async refreshModels(): Promise<void> {
         for (const p of PROVIDERS) {
             this.modelsByProvider.set(p.kind, await this.switchService.getModelsForProvider(p.kind));
-            if (p.fixedModelId) {
+            if (p.local) {
                 this.syncCustomEndpointState(p.kind);
             }
         }
     }
 
     protected isCustomEndpointProvider(kind: ArschatProviderKind = this.provider): boolean {
-        return !!PROVIDERS.find(p => p.kind === kind)?.fixedModelId;
+        return !!PROVIDERS.find(p => p.kind === kind)?.local;
+    }
+
+    protected async checkCliAgent(): Promise<void> {
+        const seq = ++this.cliCheckSequence;
+        const kind = this.provider;
+        this.cliAgentNotice = '';
+        if (!isCliAgent(kind)) { return; }
+        try {
+            const result = await this.cliAgentService.check(kind, readCliSettings((key, fallback) => this.preferenceService.get(key, fallback)));
+            if (seq === this.cliCheckSequence && kind === this.provider && !this.isDisposed) {
+                this.cliAgentNotice = result.message ?? '';
+                this.update();
+            }
+        } catch {
+            if (seq === this.cliCheckSequence && kind === this.provider && !this.isDisposed) {
+                this.cliAgentNotice = 'CLI の起動前チェックに失敗しました。';
+                this.update();
+            }
+        }
     }
 
     protected syncCustomEndpointState(kind: ArschatProviderKind): void {
@@ -491,6 +525,7 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected currentModelNames(): string[] {
+        if (isCliAgent(this.provider)) { return [this.provider]; }
         const provider = PROVIDERS.find(p => p.kind === this.provider);
         const models = this.modelsByProvider.get(this.provider) ?? [];
         if (provider?.fixedModelId) {
@@ -515,6 +550,7 @@ export class ArschatChatWidget extends ReactWidget {
 
     protected async onProviderChange(kind: ArschatProviderKind): Promise<void> {
         this.provider = kind;
+        this.cliAgentNotice = '';
         this.abortLiveCustomModelRequests(kind);
         await this.refreshModels();
         // A newer provider switch may have overtaken us during the await above;
@@ -1722,6 +1758,62 @@ export class ArschatChatWidget extends ReactWidget {
         return modelNames.includes(this.model) ? this.model : '';
     }
 
+    protected cliPermissionSelection(): { key: 'codexSandbox' | 'claudePermissionMode'; value: string; modes: readonly string[] } {
+        const key = this.provider === 'codex-cli' ? 'codexSandbox' : 'claudePermissionMode';
+        const settings = readCliSettings((name, fallback) => this.preferenceService.get(name, fallback));
+        return { key, value: settings[key], modes: key === 'codexSandbox' ? CODEX_SANDBOX_MODES : CLAUDE_PERMISSION_MODES };
+    }
+
+    protected isUnrestrictedCliMode(value: string): boolean {
+        return value === 'danger-full-access' || value === 'bypassPermissions';
+    }
+
+    protected readonly cliPermissionWarning = 'このモードでは CLI がファイル削除やコマンド実行を確認なしで行えます。';
+
+    protected async onCliPermissionChange(value: string): Promise<void> {
+        if (!isCliAgent(this.provider) || this.cliPermissionPending) { return; }
+        const provider = this.provider;
+        const selection = this.cliPermissionSelection();
+        if (value === selection.value || !selection.modes.includes(value)) { return; }
+        this.cliPermissionPending = true;
+        this.update();
+        try {
+            if (this.isUnrestrictedCliMode(value)) {
+                const confirmed = await new ConfirmDialog({
+                    title: 'CLI の権限モードを変更', msg: `${value}: ${this.cliPermissionWarning}`,
+                    ok: 'このモードを使用', cancel: 'キャンセル'
+                }).open();
+                if (confirmed !== true) { return; }
+            }
+            if (this.isDisposed || this.provider !== provider) { return; }
+            await this.preferenceService.set(CLI_PREF + CLI_PREFERENCE_KEYS[selection.key], value, PreferenceScope.User);
+        } catch {
+            this.cliAgentNotice = 'CLI の権限モードを保存できませんでした。';
+        } finally {
+            this.cliPermissionPending = false;
+            this.update();
+        }
+    }
+
+    protected renderCliPermissionSelect(): React.ReactNode {
+        if (!isCliAgent(this.provider)) { return undefined; }
+        const { value, modes } = this.cliPermissionSelection();
+        const unrestricted = this.isUnrestrictedCliMode(value);
+        return <label className='arschat-cli-permission-label' htmlFor='arschat-cli-permission-select'>
+            権限
+            <select
+                id='arschat-cli-permission-select'
+                className={`theia-select arschat-cli-permission-select${unrestricted ? ' arschat-cli-permission-warning' : ''}`}
+                title={unrestricted ? this.cliPermissionWarning : 'CLI の権限モード'}
+                value={value}
+                disabled={this.cliPermissionPending}
+                onChange={e => { void this.onCliPermissionChange(e.target.value); }}
+            >
+                {modes.map(mode => <option key={mode} value={mode}>{mode}</option>)}
+            </select>
+        </label>;
+    }
+
     // ---------------------------------------------------------------- render
 
     render(): React.ReactElement {
@@ -1767,12 +1859,17 @@ export class ArschatChatWidget extends ReactWidget {
                             onChange={e => this.onProviderChange(e.target.value as ArschatProviderKind)}
                         >
                             <optgroup label='クラウド'>
-                                {PROVIDERS.filter(p => !p.local).map(p => (
+                                {PROVIDERS.filter(p => !p.local && p.group !== 'cli').map(p => (
                                     <option key={p.kind} value={p.kind}>{p.label}</option>
                                 ))}
                             </optgroup>
                             <optgroup label='ローカル'>
                                 {PROVIDERS.filter(p => p.local).map(p => (
+                                    <option key={p.kind} value={p.kind}>{p.label}</option>
+                                ))}
+                            </optgroup>
+                            <optgroup label='エージェント (CLI)'>
+                                {PROVIDERS.filter(p => p.group === 'cli').map(p => (
                                     <option key={p.kind} value={p.kind}>{p.label}</option>
                                 ))}
                             </optgroup>
@@ -1787,6 +1884,7 @@ export class ArschatChatWidget extends ReactWidget {
                         >
                             {this.renderModelOptions(modelNames)}
                         </select>
+                        {this.renderCliPermissionSelect()}
                         <button
                             id='arschat-terminal-toggle-button'
                             className='theia-button secondary arschat-terminal-toggle-button'
@@ -1800,6 +1898,9 @@ export class ArschatChatWidget extends ReactWidget {
                         >API キー</button>
                     </div>
                 </div>
+                {isCliAgent(this.provider) && this.cliAgentNotice && (
+                    <div className='arschat-cli-agent-notice' role='status' title={this.cliAgentNotice}>{this.cliAgentNotice}</div>
+                )}
                 {this.isCustomEndpointProvider(this.provider) && (
                     <div className='arschat-custom-endpoint-row'>
                         <label className='arschat-custom-endpoint-label' htmlFor='arschat-custom-endpoint-url'>接続先</label>

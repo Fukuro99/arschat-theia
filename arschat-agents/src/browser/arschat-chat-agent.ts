@@ -30,6 +30,11 @@
 // *****************************************************************************
 
 import { inject, injectable } from '@theia/core/shared/inversify';
+import { PreferenceService } from '@theia/core';
+import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
+import { FileUri } from '@theia/core/lib/common/file-uri';
+import { CLI_SETTINGS, isCliAgent } from 'arschat-providers/lib/common/cli-agents';
+import { readCliSettings } from 'arschat-providers/lib/browser/cli-agent-preferences';
 import { AbstractStreamParsingChatAgent, ChatAgentLocation, ChatSessionContext, SystemMessageDescription } from '@theia/ai-chat/lib/common/chat-agents';
 import { AIVariableContext, LanguageModel, LanguageModelMessage, LanguageModelRequirement, LanguageModelResponse, ToolRequest } from '@theia/ai-core';
 import { CodeChatResponseContent, MarkdownChatResponseContent, MutableChatRequestModel } from '@theia/ai-chat/lib/common/chat-model';
@@ -55,6 +60,9 @@ export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
 
     @inject(ArschatMemoryService)
     protected readonly memory!: ArschatMemoryService;
+
+    @inject(PreferenceService) protected readonly cliPreferences!: PreferenceService;
+    @inject(WorkspaceService) protected readonly cliWorkspace!: WorkspaceService;
 
     private readonly mockRequests = new WeakSet<MutableChatRequestModel>();
 
@@ -93,10 +101,24 @@ export class ArschatChatAgent extends AbstractStreamParsingChatAgent {
         return text || functions.length ? { text, functionDescriptions: new Map(functions.map(tool => [tool.id, tool])) } : undefined;
     }
 
-    protected override sendLlmRequest(request: MutableChatRequestModel, messages: LanguageModelMessage[], tools: ToolRequest[],
+    protected override async sendLlmRequest(request: MutableChatRequestModel, messages: LanguageModelMessage[], tools: ToolRequest[],
         model: LanguageModel, promptVariantId?: string, customized?: boolean): Promise<LanguageModelResponse> {
         // Check the actual selected model too: AISettingsService can override ProviderSwitchService.
         if (isMockModel(model.id)) { this.mockRequests.add(request); }
+        if (isCliAgent(model.id)) {
+            await this.cliPreferences.ready;
+            const settings = readCliSettings((key, fallback) => this.cliPreferences.get(key, fallback));
+            if (!settings.workingDirectory) {
+                const root = (await this.cliWorkspace.roots)[0];
+                if (root?.resource.scheme === 'file') { settings.workingDirectory = FileUri.fsPath(root.resource); }
+            }
+            return this.languageModelService.sendRequest(model, {
+                messages, settings: { [CLI_SETTINGS]: settings }, agentId: this.id,
+                sessionId: request.session.id, requestId: request.id,
+                cancellationToken: request.response.cancellationToken,
+                promptVariantId, isPromptVariantCustomized: customized
+            });
+        }
         return super.sendLlmRequest(request, messages, tools, model, promptVariantId, customized);
     }
 

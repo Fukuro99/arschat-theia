@@ -228,7 +228,7 @@ export class ProviderSwitchService {
     protected async doSetActive(provider: ArschatProviderKind, model?: string): Promise<ArschatActiveSelection | undefined> {
         await this.preferenceService.set(PREF_ACTIVE_PROVIDER, provider, PreferenceScope.User);
         if (model !== undefined) {
-            if (providerByKind(provider)?.fixedModelId) {
+            if (providerByKind(provider)?.local) {
                 await this.updateCustomEndpointModel(provider, model);
             }
             await this.preferenceService.set(PREF_ACTIVE_MODEL, model, PreferenceScope.User);
@@ -292,6 +292,7 @@ export class ProviderSwitchService {
     }
 
     protected getActiveDisplayModel(provider: ArschatProviderKind, providerDescriptor = providerByKind(provider)): string {
+        if (providerDescriptor?.group === 'cli') { return provider; }
         if (!providerDescriptor?.fixedModelId) {
             return this.getActiveModel();
         }
@@ -469,7 +470,8 @@ export class ProviderSwitchService {
 
     /** The customOpenAiModels entry id backing a custom-endpoint provider (undefined for cloud ones). */
     protected customEndpointIdFor(kind: ArschatProviderKind): string | undefined {
-        return providerByKind(kind)?.fixedModelId;
+        const provider = providerByKind(kind);
+        return provider?.group === 'cli' ? undefined : provider?.fixedModelId;
     }
 
     protected defaultCustomEndpoint(kind: ArschatProviderKind): CustomOpenAiModelEntry | undefined {

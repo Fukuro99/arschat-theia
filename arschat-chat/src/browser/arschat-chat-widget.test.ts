@@ -1,7 +1,9 @@
 import 'reflect-metadata';
-import { PreferenceScope } from '@theia/core';
+import { PreferenceScope, PreferenceService } from '@theia/core';
+import { CliAgentService } from 'arschat-providers/lib/common/cli-agents';
 import { ContainerModule, Container } from '@theia/core/shared/inversify';
 import { ApplicationShell } from '@theia/core/lib/browser';
+import { ConfirmDialog } from '@theia/core/lib/browser/dialogs';
 import { ReactWidget } from '@theia/core/lib/browser/widgets/react-widget';
 import { ArschatChatWidget } from './arschat-chat-widget';
 import { ArschatApiKeysDialogService } from './arschat-api-keys-dialog';
@@ -67,8 +69,16 @@ describe('ArschatChatWidget', () => {
     let expandInputMock: jest.Mock;
     let agentToolRequests: ToolRequest[][];
     let uiInteractionService: ArschatUiInteractionService;
+    let cliPreferences: Map<string, unknown>;
+    let setPreference: jest.Mock;
+    let preferenceChanged: (event: { preferenceName: string }) => void;
 
     beforeEach(async () => {
+        cliPreferences = new Map();
+        setPreference = jest.fn(async (key: string, value: unknown) => {
+            cliPreferences.set(key, value);
+            preferenceChanged({ preferenceName: key });
+        });
         registeredTools = new Map<string, ToolRequest>();
         setConfirmationModeCalls = [];
         setSessionConfirmationModeCalls = [];
@@ -278,6 +288,15 @@ describe('ArschatChatWidget', () => {
             } as unknown as ToolInvocationRegistry);
             bind(ArschatUiInteractionService).toConstantValue(uiInteractionService);
             bind(ArschatChatWidget).toSelf();
+            bind(CliAgentService).toConstantValue({ check: jest.fn(async () => ({ available: true })) });
+            bind(PreferenceService).toConstantValue({
+                get: (key: string, fallback: unknown) => cliPreferences.get(key) ?? fallback,
+                set: setPreference,
+                onPreferenceChanged: (listener: typeof preferenceChanged) => {
+                    preferenceChanged = listener;
+                    return { dispose(): void { /* noop */ } };
+                }
+            });
         });
         const container = new Container();
         container.load(module);
@@ -296,6 +315,133 @@ describe('ArschatChatWidget', () => {
         const element = render(widget.render());
         expect(element.queryByText('Anthropic')).toBeTruthy();
         expect(element.queryByText('LM Studio')).toBeTruthy();
+    });
+
+    it('renders three provider optgroups, with CLI providers only in the agent group', () => {
+        const element = render(widget.render());
+        const groups = Array.from(element.container.querySelectorAll('#arschat-provider-select optgroup'));
+        expect(groups.map(g => g.getAttribute('label'))).toEqual(['クラウド', 'ローカル', 'エージェント (CLI)']);
+        expect(Array.from(groups[2].querySelectorAll('option')).map(o => [o.value, o.textContent])).toEqual([
+            ['codex-cli', 'Codex (CLI)'], ['claude-code-cli', 'Claude Code (CLI)']
+        ]);
+    });
+
+    it('selects a CLI fixed model without fetching endpoint models or showing a URL field', async () => {
+        await act(async () => { await asAny(widget).onProviderChange('codex-cli'); });
+        expect(setActiveCalls[setActiveCalls.length - 1]).toEqual({ provider: 'codex-cli', model: 'codex-cli' });
+        expect(fetchCustomEndpointModels).not.toHaveBeenCalled();
+        expect(render(widget.render()).container.querySelector('#arschat-custom-endpoint-url')).toBeNull();
+    });
+
+    it.each(['anthropic', 'openai', 'lmstudio', 'ollama', 'vllm', 'llamacpp', 'unsloth', 'openai-compatible'])(
+        'hides CLI permissions for %s', provider => {
+            asAny(widget).provider = provider;
+            expect(render(widget.render()).queryByLabelText('権限')).toBeNull();
+        });
+
+    const permissionCases = [
+        ['codex-cli', 'arschat.cliAgents.codex.sandbox', 'read-only', 'workspace-write', 'danger-full-access',
+            ['read-only', 'workspace-write', 'danger-full-access']],
+        ['claude-code-cli', 'arschat.cliAgents.claudeCode.permissionMode', 'plan', 'acceptEdits', 'bypassPermissions',
+            ['plan', 'acceptEdits', 'default', 'bypassPermissions']]
+    ] as const;
+
+    it.each(permissionCases)('renders %s permission options after the model with a safe default', (provider, key, safe, _edit, _danger, modes) => {
+        asAny(widget).provider = provider;
+        const ui = render(widget.render());
+        const select = ui.getByLabelText('権限') as HTMLSelectElement;
+        expect(select.value).toBe(safe);
+        expect(Array.from(select.options).map(o => o.value)).toEqual([...modes]);
+        expect(ui.container.querySelector('#arschat-model-select')!.nextElementSibling!.contains(select)).toBe(true);
+        cliPreferences.set(key, 'unknown');
+        ui.rerender(widget.render());
+        expect(select.value).toBe(safe);
+    });
+
+    it.each(permissionCases)('immediately saves ordinary %s permissions in User scope without confirmation', async (provider, key, _safe, edit) => {
+        const open = jest.spyOn(ConfirmDialog.prototype, 'open');
+        try {
+            asAny(widget).provider = provider;
+            const ui = render(widget.render());
+            await act(async () => { fireEvent.change(ui.getByLabelText('権限'), { target: { value: edit } }); });
+            expect(open).not.toHaveBeenCalled();
+            expect(setPreference).toHaveBeenCalledWith(key, edit, PreferenceScope.User);
+            ui.rerender(widget.render());
+            expect((ui.getByLabelText('権限') as HTMLSelectElement).value).toBe(edit);
+        } finally { open.mockRestore(); }
+    });
+
+    it.each(permissionCases)('restores the previous %s permission when confirmation is cancelled', async (provider, key, _safe, edit, danger) => {
+        let finish!: (value: boolean | undefined) => void;
+        const open = jest.spyOn(ConfirmDialog.prototype, 'open').mockImplementation(function (this: ConfirmDialog) {
+            expect((this as any).props.msg).toContain('このモードでは CLI がファイル削除やコマンド実行を確認なしで行えます');
+            this.dispose();
+            return new Promise(resolve => { finish = resolve; });
+        });
+        try {
+            asAny(widget).provider = provider;
+            cliPreferences.set(key, edit);
+            const ui = render(widget.render());
+            fireEvent.change(ui.getByLabelText('権限'), { target: { value: danger } });
+            expect(open).toHaveBeenCalledTimes(1);
+            expect(setPreference).not.toHaveBeenCalled();
+            ui.rerender(widget.render());
+            expect((ui.getByLabelText('権限') as HTMLSelectElement).disabled).toBe(true);
+            await act(async () => { finish(false); });
+            ui.rerender(widget.render());
+            const select = ui.getByLabelText('権限') as HTMLSelectElement;
+            expect(select.value).toBe(edit);
+            expect(select.disabled).toBe(false);
+            expect(select.classList.contains('arschat-cli-permission-warning')).toBe(false);
+            expect(setPreference).not.toHaveBeenCalled();
+        } finally { open.mockRestore(); }
+    });
+
+    it.each(permissionCases)('saves approved unrestricted %s permissions and displays the warning', async (provider, key, safe, _edit, danger) => {
+        const open = jest.spyOn(ConfirmDialog.prototype, 'open').mockImplementation(function (this: ConfirmDialog) {
+            this.dispose();
+            return Promise.resolve(true);
+        });
+        try {
+            asAny(widget).provider = provider;
+            const ui = render(widget.render());
+            await act(async () => { fireEvent.change(ui.getByLabelText('権限'), { target: { value: danger } }); });
+            expect(open).toHaveBeenCalledTimes(1);
+            expect(setPreference).toHaveBeenCalledWith(key, danger, PreferenceScope.User);
+            ui.rerender(widget.render());
+            const select = ui.getByLabelText('権限') as HTMLSelectElement;
+            expect(select.value).toBe(danger);
+            expect(select.classList.contains('arschat-cli-permission-warning')).toBe(true);
+            expect(select.title).toContain('確認なし');
+            await act(async () => { fireEvent.change(select, { target: { value: safe } }); });
+            expect(open).toHaveBeenCalledTimes(1);
+            expect(setPreference).toHaveBeenLastCalledWith(key, safe, PreferenceScope.User);
+            ui.rerender(widget.render());
+            expect(select.classList.contains('arschat-cli-permission-warning')).toBe(false);
+        } finally { open.mockRestore(); }
+    });
+
+    it('refreshes the header on CLI preference changes from settings', () => {
+        const update = jest.spyOn(widget, 'update');
+        preferenceChanged({ preferenceName: 'arschat.cliAgents.codex.sandbox' });
+        expect(update).toHaveBeenCalled();
+        update.mockRestore();
+    });
+
+    it('shows preflight guidance and discards a stale check after switching providers', async () => {
+        const w = asAny(widget);
+        w.provider = 'claude-code-cli';
+        w.cliAgentService.check.mockResolvedValue({ available: false, message: 'API キーが必要' });
+        await act(async () => { await w.checkCliAgent(); });
+        expect(render(widget.render()).getByRole('status').textContent).toBe('API キーが必要');
+        let finish!: (value: unknown) => void;
+        w.cliAgentService.check.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+        const pending = w.checkCliAgent();
+        w.provider = 'openai';
+        await w.checkCliAgent();
+        finish({ available: false, message: 'stale' });
+        await pending;
+        expect(w.cliAgentNotice).toBe('');
     });
 
     it('renders the terminal toggle button in the header', () => {

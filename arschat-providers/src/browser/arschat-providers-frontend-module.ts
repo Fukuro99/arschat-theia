@@ -15,6 +15,10 @@
 // *****************************************************************************
 
 import { ContainerModule } from '@theia/core/shared/inversify';
+import { PreferenceContribution } from '@theia/core';
+import { CliAgentService, cliAgentServicePath } from '../common/cli-agents';
+import { cliAgentPreferenceSchema } from './cli-agent-preferences';
+import { CliAgentAutotestContribution } from './cli-agent-autotest-contribution';
 import { FrontendApplicationContribution, RemoteConnectionProvider, ServiceConnectionProvider } from '@theia/core/lib/browser';
 import { ArschatKeychainStatusService, arschatKeychainStatusPath } from '../common/arschat-keychain-status-service';
 import { bindArschatProviderPreferences } from './arschat-provider-preferences';
@@ -32,6 +36,12 @@ import { ArschatSecretSettings } from './arschat-secret-settings';
 
 export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     bindArschatProviderPreferences(bind);
+    bind(PreferenceContribution).toConstantValue({ schema: cliAgentPreferenceSchema });
+    bind(CliAgentAutotestContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(CliAgentAutotestContribution);
+    bind(CliAgentService).toDynamicValue(ctx =>
+        ctx.container.get<ServiceConnectionProvider>(RemoteConnectionProvider).createProxy<CliAgentService>(cliAgentServicePath)
+    ).inSingletonScope();
 
     bind(ArschatKeychainStatusService).toDynamicValue(ctx =>
         ctx.container.get<ServiceConnectionProvider>(RemoteConnectionProvider)

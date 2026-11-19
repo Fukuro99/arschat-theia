@@ -817,3 +817,24 @@
 .arschat-api-keys-dialog [role='alert'] {
     color: var(--theia-errorForeground);
 }
+/* CLI preflight guidance stays below the header on one line; the title exposes the full explanation. */
+.arschat-cli-agent-notice {
+    padding: 4px 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--theia-descriptionForeground);
+    flex-shrink: 0;
+}
+
+.arschat-cli-permission-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.arschat-cli-permission-select.arschat-cli-permission-warning {
+    color: var(--theia-inputValidation-warningForeground, var(--theia-editorWarning-foreground));
+    background-color: var(--theia-inputValidation-warningBackground);
+    border-color: var(--theia-inputValidation-warningBorder);
+}

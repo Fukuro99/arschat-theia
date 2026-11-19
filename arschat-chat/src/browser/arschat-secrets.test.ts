@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { CliAgentAutotestContribution } from 'arschat-providers/lib/browser/cli-agent-autotest-contribution';
 import { ArschatKeychainStatusService, arschatKeychainStatusPath } from 'arschat-providers/lib/common/arschat-keychain-status-service';
 import { Emitter, PreferenceScope } from '@theia/core';
 import { KeyStoreService } from '@theia/core/lib/common/key-store';
@@ -661,7 +662,7 @@ it('rebinds real Theia frontend modules without duplicate aliases and uses injec
     container.rebind(AnthropicLanguageModelsManager).toConstantValue(manager);
     container.rebind(OpenAiLanguageModelsManager).toConstantValue(manager);
     // These unrelated contributions need chat/registry services. Keep their real aliases, stub the instances.
-    for (const token of [ArschatM2AutotestContribution, ArschatLocalLlmAutotestContribution, ArschatProvidersSeedContribution]) {
+    for (const token of [ArschatM2AutotestContribution, ArschatLocalLlmAutotestContribution, ArschatProvidersSeedContribution, CliAgentAutotestContribution]) {
         container.rebind<unknown>(token).toConstantValue({});
     }
     expect(container.get(ArschatKeychainStatusService)).toBe(f.keychainStatus);

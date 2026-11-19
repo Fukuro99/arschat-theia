@@ -8,6 +8,9 @@ import { backendApplicationModule } from '@theia/core/lib/node/backend-applicati
 import { ArschatKeyStoreServiceImpl } from 'arschat-providers/lib/node/arschat-key-store-service-impl';
 import { ArschatKeychainStatusService, arschatKeychainStatusPath } from 'arschat-providers/lib/common/arschat-keychain-status-service';
 import providersModule from 'arschat-providers/lib/node/arschat-providers-backend-module';
+import { LanguageModelProvider } from '@theia/ai-core';
+import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
+import { CliAgentService, cliAgentServicePath, CLAUDE_KEY_REQUIRED } from 'arschat-providers/lib/common/cli-agents';
 
 // Only this backend suite loads the real Theia class. Native keytar remains wholly synthetic.
 jest.unmock('@theia/core/lib/node/key-store-server');
@@ -40,6 +43,24 @@ function backend() {
     const status = container.get<ArschatKeychainStatusService>(ArschatKeychainStatusService);
     return { container, store, status };
 }
+
+it('contributes both CLI LanguageModels and a shared preflight RPC service', async () => {
+    const { container } = backend();
+    container.rebind(EnvVariablesServer).toConstantValue({ getConfigDirUri: async () => 'file:///unused' });
+    const models = (await Promise.all(container.getAll<LanguageModelProvider>(LanguageModelProvider).map(provider => provider()))).flat();
+    expect(models.map(model => [model.id, model.name, model.vendor])).toEqual([
+        ['codex-cli', 'Codex (CLI)', 'Codex (CLI)'], ['claude-code-cli', 'Claude Code (CLI)', 'Claude Code (CLI)']
+    ]);
+    const handler = container.getAll<any>(ConnectionHandler).find(h => h.path === cliAgentServicePath);
+    expect(handler.targetFactory()).toBe(container.get(CliAgentService));
+    const saved = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+        expect(await models[1].request({ messages: [], sessionId: 's', requestId: 'r' })).toEqual({ text: CLAUDE_KEY_REQUIRED });
+    } finally {
+        if (saved === undefined) { delete process.env.ANTHROPIC_API_KEY; } else { process.env.ANTHROPIC_API_KEY = saved; }
+    }
+});
 
 it('rebinds the core singleton and both RPC handlers resolve that same credential instance', async () => {
     const { container, store, status } = backend();
