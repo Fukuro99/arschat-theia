@@ -4,7 +4,8 @@ export const CLI_SETTINGS = 'arschatCliAgents';
 export const CLI_PREF = 'arschat.cliAgents.';
 export const CODEX_SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const;
 export const CLAUDE_PERMISSION_MODES = ['plan', 'acceptEdits', 'default', 'bypassPermissions'] as const;
-export const CLAUDE_KEY_REQUIRED = 'Claude Code を呼ぶには Anthropic の API キーが必要です。チャットヘッダーの『API キー』から Anthropic のキーを保存してください (Claude のサブスクリプションのログインは、Anthropic の規約によりサードパーティのアプリからは使えません)。';
+export const CLAUDE_LOGIN_REQUIRED = 'Claude Code にログインしていません。ターミナルで `claude` を起動し、/login で Claude のサブスクリプションのアカウントにログインしてから、もう一度送ってください。';
+export const CLAUDE_SUBSCRIPTION_REQUIRED = 'Claude Code が API キーまたは他社クラウドの認証で設定されています。ArsChat は Claude のサブスクリプションのログインでのみ Claude Code を動かします。Claude Code の設定から API キー (apiKeyHelper や env の ANTHROPIC_API_KEY) を外し、ターミナルで `claude` → /login でログインしてください。';
 export const CLI_IMAGE_NOTICE = '画像は CLI プロバイダでは送れません';
 export interface CliAgentSettings {
     codexCommand: string;
@@ -36,7 +37,7 @@ export function normalizeCliSettings(raw: unknown): CliAgentSettings {
             ? Math.min(s.timeoutMinutes, 1440) : 15
     };
 }
-export interface CliAgentCheck { available: boolean; keyAvailable?: boolean; message?: string }
+export interface CliAgentCheck { available: boolean; loggedIn?: boolean; message?: string }
 export const CliAgentService = Symbol('CliAgentService');
 export const cliAgentServicePath = '/services/arschat/cli-agents';
 export interface CliAgentService {

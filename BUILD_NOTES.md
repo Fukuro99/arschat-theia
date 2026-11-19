@@ -1562,3 +1562,19 @@ M5 AUTOTEST の構造(EnvVariablesServer 経由の backend env ゲート・`[M6]
 Codex レビューは 5 巡で収束 (blocker 4 / should-fix 9 を修正)。判断で残した既知事項: 親 (CLI 本体) が先に異常終了した場合の孫プロセス残存 (Node 単体で Job Object を作れないため)、設定画面からの無制限モード選択は確認ダイアログなし (説明欄に警告)。
 
 実機確認できなかった項目 (ユーザー確認待ち): Anthropic API キーを保存した状態での Claude Code (CLI) の実応答、ヘッダーの「権限」select と無制限モードの確認ダイアログの目視、workspace-write / acceptEdits でのファイル編集の往復。
+
+### Claude Code をサブスクリプションのログインで動かす方式へ変更 (2026-11-19)
+
+ユーザー判断で Claude Code (CLI) の API キー方式を廃止し、CLI 自身の保存済みログイン (Claude のサブスクリプション) で動かす形に変えた。ブリーフ: [docs/briefs/CLI_CLAUDE_LOGIN_BRIEF.md](docs/briefs/CLI_CLAUDE_LOGIN_BRIEF.md)。上の「認証・制約」節の Claude の記述 (金庫のキー・`ANTHROPIC_API_KEY` 注入・`--bare`) はこの変更で置き換わった。
+
+- 事前準備: ターミナルで `claude` → `/login` (または `claude auth login`)。ArsChat はログインを起動せず、認証ファイルもトークンも読まない。
+- 起動引数から `--bare` を外した。Claude の子環境には許可リストに加えて `CLAUDE_CONFIG_DIR` だけを通し、`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` / Bedrock・Vertex 切替は渡さない (環境変数のキーで黙って API 従量課金に切り替わらないように)。`KeyStoreService` は CLI では使わなくなった。
+- 本体 (`-p`) の前に、同じ作業ディレクトリで `claude auth status` (JSON) を実行して判定する。stdout はアカウント情報を含み得るのでログ・戻り値に出さない (64KB 上限、10 秒タイムアウト)。
+  - `loggedIn: false` → 起動せず「ログインしていません」の案内。
+  - `authMethod` が `claude.ai` / `oauth_token` → 起動。
+  - `api_key` / `api_key_helper` / `third_party` / 未知 → 起動せず「API キーの設定を外してログインし直して」の案内 (プロジェクトやユーザー設定の apiKeyHelper・env 経由の API 課金も検出して止める)。
+  - JSON でない・タイムアウト・起動失敗 → 「CLI が見つからないか起動できません」。
+- Codex レビュー 2 巡で収束 (1 巡目: authMethod 未検証、auth status と本体の cwd 不一致 → 修正)。
+- 検証: providers / chat / agents の build green、jest は arschat-chat 370 PASS・arschat-agents 116 PASS (既存スキップ 1)。Electron 実機 `ARSCHAT_CLI_AGENTS_AUTOTEST=1` で **3 PASS / 0 FAIL** (codex の PONG・東京。Claude は未ログイン環境で `-p` を起動せず「ログインしていません」を返す)。
+- 注意: 自分のマシンで自分のログインを使う個人利用は、スクリプトから `claude -p` を呼ぶのと同じ扱い。ArsChat を配布して「Claude のサブスクリプションで動く」機能として他人に提供する形は、Anthropic が第三者製品に対して制限している (事前承認がない限り claude.ai ログイン・利用枠の提供は不可)。配布時に要再検討。
+- 未確認 (ユーザー確認待ち): ログイン済み状態での Claude Code (CLI) の実応答。

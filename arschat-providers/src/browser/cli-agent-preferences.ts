@@ -9,6 +9,9 @@ export const CLI_PREFERENCE_KEYS: Record<keyof CliAgentSettings, string> = {
 export const cliAgentPreferenceSchema: PreferenceSchema = { properties: Object.fromEntries(
     (Object.keys(CLI_PREFERENCE_KEYS) as (keyof CliAgentSettings)[]).map(key => [CLI_PREF + CLI_PREFERENCE_KEYS[key], {
         type: key === 'timeoutMinutes' ? 'number' : 'string', default: CLI_DEFAULTS[key],
+        ...(key === 'claudeCommand' ? {
+            markdownDescription: 'Claude Code CLI の実行ファイル。事前にターミナルで `claude` を起動してログインしておくと、そのログイン (Claude のサブスクリプション) で動きます。ArsChat は認証情報を読みません。'
+        } : {}),
         ...(key === 'codexSandbox' ? {
             enum: [...CODEX_SANDBOX_MODES],
             markdownDescription: 'Codex のサンドボックスモード。**警告:** `danger-full-access` は CLI がファイル削除・コマンド実行を確認なしで行えるモードです。'

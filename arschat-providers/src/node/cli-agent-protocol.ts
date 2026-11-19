@@ -94,7 +94,7 @@ export class CliAgentDecoder {
         } else {
             if (e.parent_tool_use_id) { return []; }
             if (e.type === 'result') {
-                if (e.is_error) { throw new Error('Claude Code がエラーを返しました。API キー・接続・利用枠を確認してください。'); }
+                if (e.is_error) { throw new Error('Claude Code がエラーを返しました。ログイン・接続・利用枠を確認してください。'); }
                 // result repeats the final text block, not earlier text/tool/thinking blocks.
                 const textBlock = [...this.blocks.values()].reverse().find(b => b.type === 'text');
                 const parts = typeof e.result === 'string' ? this.reconcile(textBlock ?? this.block('text'), e.result) : [];

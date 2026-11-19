@@ -14,7 +14,7 @@ import { CliAgentDecoder, cliTranscript } from 'arschat-providers/lib/node/cli-a
 import { cliExecutable, killCliTree, spawnCli } from 'arschat-providers/lib/node/cli-agent-process';
 import { cliEnvironment } from 'arschat-providers/lib/node/cli-agent-env';
 import { CliStreamRedactor } from 'arschat-providers/lib/node/cli-agent-redactor';
-import { CLAUDE_KEY_REQUIRED, CLI_DEFAULTS, CLI_IMAGE_NOTICE, CLI_SETTINGS, normalizeCliSettings } from 'arschat-providers/lib/common/cli-agents';
+import { CLAUDE_LOGIN_REQUIRED, CLAUDE_SUBSCRIPTION_REQUIRED, CLI_DEFAULTS, CLI_IMAGE_NOTICE, CLI_SETTINGS, normalizeCliSettings } from 'arschat-providers/lib/common/cli-agents';
 import { PROVIDERS, customEndpointProviders } from 'arschat-providers/lib/browser/arschat-provider-preferences';
 import { ProviderSwitchService } from 'arschat-providers/lib/browser/provider-switch-service';
 import { CliAgentAutotestContribution } from 'arschat-providers/lib/browser/cli-agent-autotest-contribution';
@@ -51,13 +51,24 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
         process.env = { ...savedEnv };
         delete process.env.ANTHROPIC_API_KEY;
         child = new FakeChild();
-        mockedSpawn.mockReset().mockImplementation((command: string) => /taskkill\.exe$/i.test(command) ? new FakeChild() : child);
+        mockedSpawn.mockReset().mockImplementation((command: string, args: string[]) => {
+            if (/taskkill\.exe$/i.test(command)) { return new FakeChild(); }
+            if (args[0] === 'auth') {
+                const auth = new FakeChild();
+                void Promise.resolve().then(() => { auth.json({ loggedIn: true, authMethod: 'claude.ai' }); auth.emit('close', 0); });
+                return auth;
+            }
+            return child;
+        });
         jest.spyOn(process, 'kill').mockImplementation(() => true);
-        getPassword = jest.fn(async () => undefined);
+        getPassword = jest.fn(async () => 'vault-key');
         service = new CliAgentServiceImpl();
         Object.assign(service, { keys: { getPassword }, envServer: { getConfigDirUri: jest.fn() } });
     });
-    afterEach(() => { process.env = savedEnv; jest.useRealTimers(); jest.restoreAllMocks(); });
+    afterEach(() => {
+        process.env = savedEnv; jest.useRealTimers(); jest.restoreAllMocks();
+        expect(getPassword).not.toHaveBeenCalled();
+    });
 
     it('streams codex text, thinking and operation names while excluding command output and patches', async () => {
         const output = collect(await service.request('codex-cli', request()));
@@ -77,7 +88,6 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
     });
 
     it('streams Claude partial messages once and handles thinking', async () => {
-        getPassword.mockResolvedValue('vault-key');
         const output = collect(await service.request('claude-code-cli', request()));
         child.json({ type: 'system' });
         child.json({ type: 'stream_event', event: { delta: { type: 'thinking_delta', thinking: '考え' } } });
@@ -89,7 +99,6 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
     });
 
     it.each(['codex-cli', 'claude-code-cli'] as const)('stops %s immediately on a broken JSON line', async kind => {
-        getPassword.mockResolvedValue('vault-key');
         const response = await service.request(kind, request());
         if (!('stream' in response)) { throw new Error('Expected a stream'); }
         const iterator = response.stream[Symbol.asyncIterator]();
@@ -101,14 +110,13 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
         expect(child.stdout.destroyed).toBe(true);
         expect(child.stderr.destroyed).toBe(true);
         if (process.platform === 'win32') {
-            expect(mockedSpawn.mock.calls[1][1]).toEqual(['/T', '/F', '/PID', '987654']);
+            expect(mockedSpawn.mock.calls[kind === 'claude-code-cli' ? 2 : 1][1]).toEqual(['/T', '/F', '/PID', '987654']);
         } else { expect(process.kill).toHaveBeenCalledWith(-987654, 'SIGKILL'); }
         expect(jest.getTimerCount()).toBe(0);
         await assertion;
     });
 
     it.each(['codex-cli', 'claude-code-cli'] as const)('rejects a broken final line without a newline for %s', async kind => {
-        getPassword.mockResolvedValue('vault-key');
         const output = collect(await service.request(kind, request()));
         const assertion = expect(output).rejects.toThrow('CLI の出力を解釈できませんでした');
         child.stdout.write('{broken');
@@ -120,7 +128,6 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
     });
 
     it('stops Claude when its complete text cannot extend the accumulated deltas', async () => {
-        getPassword.mockResolvedValue('vault-key');
         const output = collect(await service.request('claude-code-cli', request()));
         const assertion = expect(output).rejects.toThrow('CLI がエラー');
         child.json({ type: 'stream_event', event: { delta: { type: 'text_delta', text: 'helworld' } } });
@@ -131,7 +138,6 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
     });
 
     it.each([false, true])('completes Claude text/tool/text blocks without losing or repeating text (new message: %s)', async newMessage => {
-        getPassword.mockResolvedValue('vault-key');
         const output = collect(await service.request('claude-code-cli', request()));
         const event = (value: unknown): void => child.json({ type: 'stream_event', event: value });
         const assistant = (id: string, content: unknown): void => child.json({ type: 'assistant', message: { id, content: [content] } });
@@ -156,7 +162,7 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
         event({ type: 'content_block_stop', index });
         event({ type: 'message_stop' });
         expect(child.stdout.destroyed).toBe(false);
-        expect(mockedSpawn).toHaveBeenCalledTimes(1);
+        expect(mockedSpawn).toHaveBeenCalledTimes(2);
         child.json({ type: 'result', result: '回答です。' });
         expect(await output).toEqual([{ content: '調べます。' }, { content: '回答' }, { content: 'です。' }]);
         expect(jest.getTimerCount()).toBe(0);
@@ -169,45 +175,205 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
         await assertion;
     });
     it('rejects Claude result is_error without returning sensitive result text', async () => {
-        getPassword.mockResolvedValue('vault-key');
         const output = collect(await service.request('claude-code-cli', request()));
         const assertion = expect(output).rejects.toThrow('CLI がエラー');
         child.json({ type: 'result', is_error: true, result: 'vault-key' });
         await assertion;
     });
-    it('uses the vault key only in env, strips OAuth, drains stderr without logging', async () => {
+    it('checks saved login before prompting, ignores all API keys and tokens, and drains stderr without logging', async () => {
         process.env.ANTHROPIC_API_KEY = 'env-key';
         process.env.ANTHROPIC_AUTH_TOKEN = 'auth-token';
         process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oauth-token';
-        getPassword.mockResolvedValue('vault-key');
+        process.env.CLAUDE_CONFIG_DIR = '/custom/claude';
         const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
         const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
         const output = collect(await service.request('claude-code-cli', request()));
-        const [command, args, options] = mockedSpawn.mock.calls[0];
-        expect(getPassword).toHaveBeenCalledWith('arschat', 'anthropic');
-        expect(options.env.ANTHROPIC_API_KEY).toBe('vault-key');
+        expect(mockedSpawn.mock.calls[0][1]).toEqual(['auth', 'status']);
+        const [command, args, options] = mockedSpawn.mock.calls[1];
+        expect(getPassword).not.toHaveBeenCalled();
+        expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
         expect(options.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
         expect(options.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+        expect(options.env.CLAUDE_CONFIG_DIR).toBe('/custom/claude');
+        expect(mockedSpawn.mock.calls[0][2].env).toEqual(options.env);
         expect(JSON.stringify([command, args, child.stdin.end.mock.calls])).not.toContain('vault-key');
-        expect(args).toContain('--bare');
+        expect(args).toEqual(['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-mode', 'plan']);
         child.stderr.write('vault-key auth-token oauth-token');
         child.json({ type: 'result', result: 'PONG' });
         await output;
         expect(log).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled();
         expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe('auth-token');
     });
-    it.each([false, true])('falls back to backend API key (vault throws: %s)', async throws => {
-        if (throws) { getPassword.mockRejectedValue(new Error('secret')); }
-        process.env.ANTHROPIC_API_KEY = 'env-key';
-        const output = collect(await service.request('claude-code-cli', request()));
-        expect(mockedSpawn.mock.calls[0][2].env.ANTHROPIC_API_KEY).toBe('env-key');
-        child.json({ type: 'result', result: 'PONG' });
-        await output;
+    it('returns login instructions without prompting when auth status is false (exit 1)', async () => {
+        mockedSpawn.mockReturnValueOnce(child);
+        const result = service.request('claude-code-cli', request());
+        await Promise.resolve();
+        expect(mockedSpawn.mock.calls[0][1]).toEqual(['auth', 'status']);
+        child.json({ loggedIn: false }); child.emit('exit', 1); child.emit('close', 1);
+        expect(await result).toEqual({ text: CLAUDE_LOGIN_REQUIRED });
+        expect(mockedSpawn).toHaveBeenCalledTimes(1);
+        expect(getPassword).not.toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(0);
     });
-    it('never spawns Claude for request or preflight without a key', async () => {
-        expect(await service.request('claude-code-cli', request())).toEqual({ text: CLAUDE_KEY_REQUIRED });
-        expect(await service.check('claude-code-cli', CLI_DEFAULTS)).toMatchObject({ keyAvailable: false, message: CLAUDE_KEY_REQUIRED });
-        expect(mockedSpawn).not.toHaveBeenCalled();
+    describe.each(['none', 'claude.ai', 'oauth_token', 'api_key', 'api_key_helper', 'third_party', 'unknown', undefined, null, 42])
+    ('Claude authMethod=%s', authMethod => {
+        it.each([true, false])('checks and gates prompting with loggedIn=%s', async loggedIn => {
+            const subscription = loggedIn && (authMethod === 'claude.ai' || authMethod === 'oauth_token');
+            const message = loggedIn ? CLAUDE_SUBSCRIPTION_REQUIRED : CLAUDE_LOGIN_REQUIRED;
+            const authChildren: FakeChild[] = [];
+            mockedSpawn.mockImplementation((command: string, args: string[]) => {
+                if (/taskkill\.exe$/i.test(command)) { return new FakeChild(); }
+                if (args[0] === 'auth') {
+                    const auth = new FakeChild();
+                    authChildren.push(auth);
+                    void Promise.resolve().then(() => {
+                        auth.json({ loggedIn, authMethod, email: 'private@example.test' });
+                        auth.emit('close', loggedIn ? 0 : 1);
+                    });
+                    return auth;
+                }
+                return child;
+            });
+            const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+            const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+            const settings = { ...CLI_DEFAULTS, claudeCommand: process.execPath, workingDirectory: process.cwd() };
+            expect(await service.check('claude-code-cli', settings)).toEqual(subscription
+                ? { available: true, loggedIn: true } : { available: false, loggedIn, message });
+            const response = await service.request('claude-code-cli', request());
+            expect(mockedSpawn.mock.calls.map(call => call[1][0])).toEqual(subscription ? ['auth', 'auth', '-p'] : ['auth', 'auth']);
+            if (subscription) {
+                child.json({ type: 'result', result: 'PONG' });
+                expect(await collect(response)).toEqual([{ content: 'PONG' }]);
+            } else { expect(response).toEqual({ text: message }); }
+            for (const auth of authChildren) {
+                expect(auth.stdout.destroyed).toBe(true); expect(auth.stderr.destroyed).toBe(true);
+            }
+            expect(log).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled();
+            expect(jest.getTimerCount()).toBe(0);
+        });
+    });
+
+    it.each([false, true])('uses the same cwd for check, request auth and prompting (default: %s)', async useDefault => {
+        const mkdir = jest.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+        const configUri = FileUri.create(path.join(process.cwd(), 'config')).toString();
+        const getConfigDirUri = jest.fn(async () => configUri);
+        Object.assign(service, { envServer: { getConfigDirUri } });
+        const workingDirectory = useDefault ? '' : path.join(process.cwd(), 'project');
+        const cwd = useDefault ? path.join(FileUri.fsPath(configUri), 'arschat', 'cli-agents') : workingDirectory;
+        const settings = { ...CLI_DEFAULTS, claudeCommand: process.execPath, workingDirectory };
+        expect(await service.check('claude-code-cli', settings)).toEqual({ available: true, loggedIn: true });
+        const response = await service.request('claude-code-cli', request({ workingDirectory }));
+        expect(mockedSpawn.mock.calls.map(call => [call[1][0], call[2].cwd])).toEqual([
+            ['auth', cwd], ['auth', cwd], ['-p', cwd]
+        ]);
+        if (useDefault) {
+            expect(getConfigDirUri).toHaveBeenCalledTimes(2);
+            expect(mkdir).toHaveBeenCalledTimes(2);
+            expect(mkdir).toHaveBeenCalledWith(cwd, { recursive: true });
+            expect(mkdir.mock.invocationCallOrder[0]).toBeLessThan(mockedSpawn.mock.invocationCallOrder[0]);
+            expect(mkdir.mock.invocationCallOrder[1]).toBeLessThan(mockedSpawn.mock.invocationCallOrder[1]);
+        } else {
+            expect(getConfigDirUri).not.toHaveBeenCalled(); expect(mkdir).not.toHaveBeenCalled();
+        }
+        child.json({ type: 'result', result: 'PONG' }); await collect(response);
+        expect(jest.getTimerCount()).toBe(0);
+    });
+
+    describe.each(['check', 'request'] as const)('%s working directory preparation', operation => {
+        it.each(['config', 'mkdir'])('preserves the sanitized error on %s failure without spawning', async failure => {
+            jest.spyOn(fs, 'mkdir').mockRejectedValue(new Error('private path'));
+            Object.assign(service, { envServer: { getConfigDirUri: async () => {
+                if (failure === 'config') { throw new Error('private path'); }
+                return FileUri.create(process.cwd()).toString();
+            } } });
+            const result = operation === 'check' ? service.check('claude-code-cli', CLI_DEFAULTS)
+                : service.request('claude-code-cli', request({ workingDirectory: '' }));
+            await expect(result).rejects.toThrow('CLI の作業ディレクトリを準備できませんでした。');
+            expect(mockedSpawn).not.toHaveBeenCalled();
+            expect(jest.getTimerCount()).toBe(0);
+        });
+    });
+    it.each([true, false])('preflights Claude using loggedIn=%s without exposing account details', async loggedIn => {
+        mockedSpawn.mockReturnValueOnce(child);
+        const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        const check = service.check('claude-code-cli', { ...CLI_DEFAULTS, claudeCommand: process.execPath, workingDirectory: process.cwd() });
+        await Promise.resolve();
+        expect(mockedSpawn.mock.calls[0][1]).toEqual(['auth', 'status']);
+        const payload = Buffer.from(JSON.stringify({ loggedIn, authMethod: loggedIn ? 'claude.ai' : 'none', email: 'private@example.test', organization: '秘密の組織' }));
+        child.stdout.write(payload.subarray(0, payload.length - 5));
+        child.emit('exit', loggedIn ? 0 : 1);
+        child.stdout.write(payload.subarray(payload.length - 5));
+        child.stderr.write('private@example.test'); child.emit('close', loggedIn ? 0 : 1);
+        expect(await check).toEqual(loggedIn ? { available: true, loggedIn: true }
+            : { available: false, loggedIn: false, message: CLAUDE_LOGIN_REQUIRED });
+        expect(log).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled();
+        expect(getPassword).not.toHaveBeenCalled();
+        expect(child.stdout.destroyed).toBe(true); expect(child.stderr.destroyed).toBe(true);
+        expect(jest.getTimerCount()).toBe(0);
+    });
+    it.each(['non-json', 'missing', 'string', 'null', 'timeout', 'error', 'throw', 'stdout', 'stderr', 'stdin', 'oversized'])
+    ('reports unavailable Claude for auth status %s and cleans up without leaking output', async failure => {
+        mockedSpawn.mockImplementationOnce(() => {
+            if (failure === 'throw') { throw new Error('private@example.test'); }
+            return child;
+        });
+        const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        const check = service.check('claude-code-cli', { ...CLI_DEFAULTS, claudeCommand: process.execPath, workingDirectory: process.cwd() });
+        await Promise.resolve();
+        if (failure === 'timeout') { child.emit('exit', 0); jest.advanceTimersByTime(10000); }
+        else if (failure === 'error') { child.emit('error', new Error('private@example.test')); }
+        else if (failure === 'stdout' || failure === 'stderr' || failure === 'stdin') {
+            (child[failure] as EventEmitter).emit('error', new Error('private@example.test'));
+        } else if (failure === 'oversized') { child.stdout.write(Buffer.alloc(64 * 1024 + 1, 'a')); }
+        else if (failure !== 'throw') {
+            child.stdout.write(failure === 'non-json' ? 'private@example.test'
+                : failure === 'null' ? 'null' : JSON.stringify({ email: 'private@example.test', loggedIn: failure === 'string' ? 'true' : undefined }));
+            child.emit('close', 0);
+        }
+        expect(await check).toEqual({ available: false, message: 'CLI が見つからないか起動できません。インストール: npm i -g @anthropic-ai/claude-code' });
+        expect(log).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled();
+        expect(getPassword).not.toHaveBeenCalled();
+        if (failure !== 'throw') {
+            expect(child.stdout.destroyed).toBe(true); expect(child.stderr.destroyed).toBe(true);
+            expect(child.stdin.destroy).toHaveBeenCalledTimes(1);
+            if (process.platform === 'win32') { expect(mockedSpawn.mock.calls[1][1]).toEqual(['/T', '/F', '/PID', '987654']); }
+            else { expect(process.kill).toHaveBeenCalledWith(-987654, 'SIGKILL'); }
+        }
+        expect(jest.getTimerCount()).toBe(0);
+    });
+    it.each([0, 1])('bounds auth stdout in bytes at 64KB (extra bytes: %s)', async extra => {
+        mockedSpawn.mockReturnValueOnce(child);
+        const check = service.check('claude-code-cli', { ...CLI_DEFAULTS, claudeCommand: process.execPath, workingDirectory: process.cwd() });
+        await Promise.resolve();
+        const payload = Buffer.from(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', organization: '組織' }));
+        child.stdout.write(payload);
+        child.stdout.write(Buffer.alloc(64 * 1024 - payload.length + extra, ' '));
+        child.emit('close', 0);
+        expect(await check).toMatchObject(extra ? { available: false, message: expect.stringContaining('インストール') }
+            : { available: true, loggedIn: true });
+        expect(jest.getTimerCount()).toBe(0);
+    });
+    it('rejects an unavailable auth status before prompting with a sanitized error', async () => {
+        mockedSpawn.mockReturnValueOnce(child);
+        const result = service.request('claude-code-cli', request());
+        const assertion = expect(result).rejects.toThrow('CLI を起動できませんでした。実行ファイルと作業ディレクトリを確認してください。');
+        await Promise.resolve();
+        child.stdout.write('private@example.test'); child.emit('close', 0);
+        await assertion;
+        expect(mockedSpawn.mock.calls.some(call => call[1].includes('-p'))).toBe(false);
+    });
+    it.each([true, false, undefined])('does not prompt after cancellation while auth status resolves to %s', async loggedIn => {
+        mockedSpawn.mockReturnValueOnce(child);
+        const token = new CancellationTokenSource();
+        const result = service.request('claude-code-cli', request(), token.token);
+        await Promise.resolve();
+        expect(mockedSpawn.mock.calls[0][1]).toEqual(['auth', 'status']);
+        token.cancel(); child.json({ loggedIn, authMethod: 'claude.ai' }); child.emit('close', 0);
+        expect(await result).toEqual({ text: '' });
+        expect(mockedSpawn.mock.calls.some(call => call[1].includes('-p'))).toBe(false);
+        expect(jest.getTimerCount()).toBe(0); token.dispose();
     });
     it('preflights with --version and reports missing CLI installation', async () => {
         const check = service.check('codex-cli', { ...CLI_DEFAULTS, codexCommand: process.execPath });
@@ -237,9 +403,9 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
         expect(jest.getTimerCount()).toBe(0);
         token.dispose();
     });
-    it('does not spawn for a pre-cancelled request', async () => {
+    it.each(['codex-cli', 'claude-code-cli'] as const)('does not spawn %s for a pre-cancelled request', async kind => {
         const token = new CancellationTokenSource(); token.cancel();
-        expect(await service.request('codex-cli', request(), token.token)).toEqual({ text: '' });
+        expect(await service.request(kind, request(), token.token)).toEqual({ text: '' });
         expect(mockedSpawn).not.toHaveBeenCalled(); token.dispose();
     });
     it('times out and releases the stream', async () => {
@@ -288,37 +454,15 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
         expect(jest.getTimerCount()).toBe(0);
         if (process.platform === 'win32') { expect(mockedSpawn.mock.calls.some(call => /taskkill\.exe$/i.test(call[0]))).toBe(true); }
     });
-    it('does not spawn when cancelled during the key lookup', async () => {
-        let resolve!: (key: string) => void;
-        getPassword.mockImplementation(() => new Promise(done => { resolve = done; }));
-        const token = new CancellationTokenSource();
-        const pending = service.request('claude-code-cli', request(), token.token);
-        token.cancel(); resolve('key');
-        expect(await pending).toEqual({ text: '' });
-        expect(mockedSpawn).not.toHaveBeenCalled(); token.dispose();
-    });
-
-    it.each(['content', 'thought'])('redacts secrets split at every boundary in %s, including interleaved channels', async channel => {
+    it('redacts secrets split at every boundary without reading credentials', () => {
         const key = 'FAKE-REVIEW-KEY';
-        getPassword.mockResolvedValue(key);
-        const output = collect(await service.request('claude-code-cli', request()));
-        let text = '', thought = '';
-        const delta = (value: string, thinking = false): void => {
-            if (thinking) { thought += value; } else { text += value; }
-            child.json({ type: 'stream_event', event: { delta: thinking
-                ? { type: 'thinking_delta', thinking: value } : { type: 'text_delta', text: value } } });
-        };
         for (let split = 1; split < key.length; split++) {
-            delta('before ' + key.slice(0, split), channel === 'thought');
-            delta('other ', channel !== 'thought');
-            delta(key.slice(split) + ' after ', channel === 'thought');
+            const redactor = new CliStreamRedactor([key]);
+            const text = redactor.push('before ' + key.slice(0, split))
+                + redactor.push(key.slice(split) + ' after ', true);
+            expect(text).toBe('before [REDACTED] after ');
         }
-        child.json({ type: 'assistant', message: { content: [{ type: 'text', text }, { type: 'thinking', thinking: thought }] } });
-        child.json({ type: 'result', result: text });
-        const parts = await output;
-        const combined = parts.map(p => channel === 'content' && 'content' in p ? p.content : channel === 'thought' && 'thought' in p ? p.thought : '').join('');
-        expect(combined).toBe('before [REDACTED] after '.repeat(key.length - 1));
-        expect(JSON.stringify(parts)).not.toContain(key);
+        expect(getPassword).not.toHaveBeenCalled();
     });
 
     it.each(['close', 'exit', 'error'])('kills the recorded PID and destroys pipes on abnormal %s without waiting for close', async event => {
@@ -360,12 +504,11 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
     it.each(['codex-cli', 'claude-code-cli'] as const)('passes only the allowlisted env to %s for request and preflight', async kind => {
         Object.assign(process.env, { OPENAI_API_KEY: 'openai-secret', ANTHROPIC_CUSTOM_HEADERS: 'Authorization: secret',
             CLAUDE_CODE_USE_MANTLE: '1', AWS_ACCESS_KEY_ID: 'secret', GOOGLE_APPLICATION_CREDENTIALS: 'secret', NODE_OPTIONS: '--require evil' });
-        getPassword.mockResolvedValue('vault-key');
         const response = await service.request(kind, request());
-        expect(mockedSpawn.mock.calls[0][2].env).toEqual(cliEnvironment(kind, process.env, 'vault-key'));
+        expect(mockedSpawn.mock.calls[0][2].env).toEqual(cliEnvironment(kind, process.env));
         if ('stream' in response) { await response.stream[Symbol.asyncIterator]().return!(); }
         const offset = mockedSpawn.mock.calls.length;
-        const check = service.check(kind, { ...CLI_DEFAULTS, codexCommand: process.execPath, claudeCommand: process.execPath });
+        const check = service.check(kind, { ...CLI_DEFAULTS, codexCommand: process.execPath, claudeCommand: process.execPath, workingDirectory: process.cwd() });
         await Promise.resolve(); await Promise.resolve();
         expect(mockedSpawn.mock.calls[offset][2].env).toEqual(cliEnvironment(kind, process.env));
         child.emit('close', 0); await check;
@@ -382,12 +525,12 @@ it('pins the complete environment allowlist and rejects arbitrary provider/runti
         'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS', 'https_proxy'];
     const rejected = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS',
         'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR', 'CLAUDE_CODE_USE_ANTHROPIC_AWS',
-        'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CONFIG_DIR',
+        'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
         'AWS_PROFILE', 'AWS_ACCESS_KEY_ID', 'GOOGLE_APPLICATION_CREDENTIALS', 'NODE_OPTIONS', 'NODE_PATH',
         'ELECTRON_RUN_AS_NODE', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'GITHUB_TOKEN', 'RANDOM_SECRET', 'LC_SECRET', 'PROCESSOR_SECRET'];
-    const source = Object.fromEntries([...allowed, ...rejected, 'CODEX_HOME'].map(name => [name, name + '-value']));
+    const source = Object.fromEntries([...allowed, ...rejected, 'CODEX_HOME', 'CLAUDE_CONFIG_DIR'].map(name => [name, name + '-value']));
     const expected = Object.fromEntries(allowed.map(name => [name, name + '-value']));
-    expect(cliEnvironment('claude-code-cli', source, 'selected-key')).toEqual({ ...expected, ANTHROPIC_API_KEY: 'selected-key' });
+    expect(cliEnvironment('claude-code-cli', source)).toEqual({ ...expected, CLAUDE_CONFIG_DIR: 'CLAUDE_CONFIG_DIR-value' });
     expect(cliEnvironment('codex-cli', source)).toEqual({ ...expected, CODEX_HOME: 'CODEX_HOME-value' });
     expect(source.ANTHROPIC_API_KEY).toBe('ANTHROPIC_API_KEY-value');
 });
@@ -535,7 +678,7 @@ it('resolves Windows npm JS and native shims without invoking cmd or interpolati
         rmdirSync(dir);
     }
 });
-it('autotest is opt-in and reports three scenarios, with keyless Claude accepted', async () => {
+it.each([CLAUDE_LOGIN_REQUIRED, CLAUDE_SUBSCRIPTION_REQUIRED])('autotest is opt-in and accepts Claude guidance: %s', async message => {
     const c: any = new CliAgentAutotestContribution();
     Object.assign(c, { envServer: { getValue: async () => undefined } });
     c.run = jest.fn(); await c.onStart(); expect(c.run).not.toHaveBeenCalled();
@@ -543,10 +686,11 @@ it('autotest is opt-in and reports three scenarios, with keyless Claude accepted
     Object.assign(c, {
         preferences: { ready: Promise.resolve(), get: (_k: string, d: unknown) => d },
         switchService: { getActiveProvider: () => 'openai', getActiveModel: () => 'saved', setActive: jest.fn(async (kind: string) => ({ modelId: kind })) },
-        cliService: { check: async () => ({ keyAvailable: false }) },
-        roundTrip: jest.fn().mockResolvedValueOnce('PONG').mockResolvedValueOnce('東京').mockResolvedValueOnce(CLAUDE_KEY_REQUIRED), log: jest.fn()
+        cliService: { check: async () => ({ available: false, loggedIn: message === CLAUDE_SUBSCRIPTION_REQUIRED, message }) },
+        roundTrip: jest.fn().mockResolvedValueOnce('PONG').mockResolvedValueOnce('東京').mockResolvedValueOnce(message), log: jest.fn()
     });
     await c.run();
+    expect(c.log).toHaveBeenCalledWith('claude-pong-or-login-required: PASS');
     expect(c.log).toHaveBeenLastCalledWith('SUMMARY 3 PASS / 0 FAIL');
     expect(c.switchService.setActive).toHaveBeenLastCalledWith('openai', 'saved');
 });

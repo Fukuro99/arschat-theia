@@ -1,16 +1,17 @@
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { CancellationToken } from '@theia/core';
-import { KeyStoreService } from '@theia/core/lib/common/key-store';
 import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { FileUri } from '@theia/core/lib/common/file-uri';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import type { LanguageModel, LanguageModelResponse, LanguageModelStreamResponsePart, UserRequest } from '@theia/ai-core';
-import { CLAUDE_KEY_REQUIRED, CLI_IMAGE_NOTICE, CLI_SETTINGS, CliAgentCheck, CliAgentKind, CliAgentService, CliAgentSettings, isCliAgent, normalizeCliSettings } from '../common/cli-agents';
+import { CLAUDE_LOGIN_REQUIRED, CLAUDE_SUBSCRIPTION_REQUIRED, CLI_IMAGE_NOTICE, CLI_SETTINGS, CliAgentCheck, CliAgentKind, CliAgentService, CliAgentSettings, isCliAgent, normalizeCliSettings } from '../common/cli-agents';
 import { cliTranscript, CliAgentDecoder, CliAgentOutputError } from './cli-agent-protocol';
 import { destroyCliPipes, killCliTree, spawnCli } from './cli-agent-process';
 import { cliEnvironment } from './cli-agent-env';
 import { CliStreamRedactor } from './cli-agent-redactor';
+
+type ClaudeAuth = 'subscription' | 'logged-out' | 'other-auth';
 
 export function cliArguments(kind: CliAgentKind, s: CliAgentSettings): string[] {
     if (kind === 'codex-cli') {
@@ -18,31 +19,79 @@ export function cliArguments(kind: CliAgentKind, s: CliAgentSettings): string[] 
             ...(s.codexModel ? ['-m', s.codexModel] : []), '-'];
     }
     // Installed Claude 2.1.273 calls the ordinary permission mode "manual".
-    // Bare mode explicitly prevents subscription/keychain authentication fallback.
-    return ['--bare', '-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+    return ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
         '--permission-mode', s.claudePermissionMode === 'default' ? 'manual' : s.claudePermissionMode,
         ...(s.claudeModel ? ['--model', s.claudeModel] : [])];
 }
 
 @injectable()
 export class CliAgentServiceImpl implements CliAgentService {
-    @inject(KeyStoreService) protected readonly keys!: KeyStoreService;
     @inject(EnvVariablesServer) protected readonly envServer!: EnvVariablesServer;
 
-    protected async apiKey(): Promise<string | undefined> {
+    protected async workingDirectory(s: CliAgentSettings): Promise<string> {
+        if (s.workingDirectory) { return s.workingDirectory; }
         try {
-            const key = await this.keys.getPassword('arschat', 'anthropic');
-            if (key?.trim()) { return key; }
-        } catch { /* The vault may be unavailable; never expose its error or secret. */ }
-        return process.env.ANTHROPIC_API_KEY?.trim() || undefined;
+            const cwd = path.join(FileUri.fsPath(await this.envServer.getConfigDirUri()), 'arschat', 'cli-agents');
+            await fs.mkdir(cwd, { recursive: true });
+            return cwd;
+        } catch { throw new Error('CLI の作業ディレクトリを準備できませんでした。'); }
+    }
+
+    protected claudeAuth(command: string, cwd: string): Promise<ClaudeAuth | undefined> {
+        return new Promise(resolve => {
+            try {
+                const child = spawnCli(command, ['auth', 'status'], cliEnvironment('claude-code-cli', process.env), cwd);
+                const pid = child.pid;
+                let settled = false, bytes = 0;
+                const chunks: Buffer[] = [];
+                const finish = (auth?: ClaudeAuth): void => {
+                    if (settled) { return; }
+                    settled = true; clearTimeout(timer);
+                    if (auth === undefined) { killCliTree(child, pid); }
+                    destroyCliPipes(child);
+                    chunks.length = 0;
+                    resolve(auth);
+                };
+                const timer = setTimeout(() => finish(), 10000);
+                child.stdout?.on('data', (chunk: Buffer) => {
+                    if (settled) { return; }
+                    bytes += chunk.length;
+                    if (bytes > 64 * 1024) { finish(); return; }
+                    chunks.push(chunk);
+                });
+                child.stdout?.on('error', () => finish());
+                child.stderr?.on('error', () => finish());
+                // Auth status can contain account details; never log either output stream.
+                child.stderr?.resume();
+                child.stdin?.on('error', () => finish());
+                child.on('error', () => finish());
+                // Wait for close so all stdout has arrived. Exit code 1 also means logged out.
+                child.on('close', (_code, signal) => {
+                    if (settled) { return; }
+                    if (signal) { finish(); return; }
+                    try {
+                        const status = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                        if (status?.loggedIn === false) { finish('logged-out'); }
+                        else if (status?.loggedIn === true) {
+                            finish(status.authMethod === 'claude.ai' || status.authMethod === 'oauth_token' ? 'subscription' : 'other-auth');
+                        } else { finish(); }
+                    } catch { finish(); }
+                });
+                try { child.stdin?.end(); } catch { finish(); }
+            } catch { resolve(undefined); }
+        });
     }
 
     async check(kind: CliAgentKind, raw: CliAgentSettings): Promise<CliAgentCheck> {
         if (!isCliAgent(kind)) { return { available: false, message: '不明な CLI プロバイダです。' }; }
         const s = normalizeCliSettings(raw);
-        const keyAvailable = kind === 'claude-code-cli' ? !!await this.apiKey() : undefined;
-        // No Claude process at all without an API key, including --version.
-        if (keyAvailable === false) { return { available: false, keyAvailable, message: CLAUDE_KEY_REQUIRED }; }
+        if (kind === 'claude-code-cli') {
+            const auth = await this.claudeAuth(s.claudeCommand, await this.workingDirectory(s));
+            if (auth === 'subscription') { return { available: true, loggedIn: true }; }
+            if (auth === 'logged-out') { return { available: false, loggedIn: false, message: CLAUDE_LOGIN_REQUIRED }; }
+            if (auth === 'other-auth') { return { available: false, loggedIn: true, message: CLAUDE_SUBSCRIPTION_REQUIRED }; }
+            return { available: false, message: 'CLI が見つからないか起動できません。インストール: npm i -g @anthropic-ai/claude-code' };
+        }
         const available = await new Promise<boolean>(resolve => {
             try {
                 const versionEnv = cliEnvironment(kind, process.env);
@@ -64,8 +113,8 @@ export class CliAgentServiceImpl implements CliAgentService {
                 try { child.stdin?.end(); } catch { finish(false); }
             } catch { resolve(false); }
         });
-        return { available, keyAvailable, message: available ? undefined
-            : `CLI が見つからないか起動できません。インストール: npm i -g ${kind === 'codex-cli' ? '@openai/codex' : '@anthropic-ai/claude-code'}` };
+        return { available, message: available ? undefined
+            : 'CLI が見つからないか起動できません。インストール: npm i -g @openai/codex' };
     }
 
     async request(kind: CliAgentKind, request: UserRequest, token?: CancellationToken): Promise<LanguageModelResponse> {
@@ -73,18 +122,15 @@ export class CliAgentServiceImpl implements CliAgentService {
         if (token?.isCancellationRequested) { return { text: '' }; }
         const s = normalizeCliSettings(request.settings?.[CLI_SETTINGS]);
         const env = cliEnvironment(kind, process.env);
+        const cwd = await this.workingDirectory(s);
+        if (token?.isCancellationRequested) { return { text: '' }; }
         if (kind === 'claude-code-cli') {
-            const key = await this.apiKey();
-            if (!key) { return { text: CLAUDE_KEY_REQUIRED }; }
-            env.ANTHROPIC_API_KEY = key;
+            const auth = await this.claudeAuth(s.claudeCommand, cwd);
+            if (token?.isCancellationRequested) { return { text: '' }; }
+            if (auth === 'logged-out') { return { text: CLAUDE_LOGIN_REQUIRED }; }
+            if (auth === 'other-auth') { return { text: CLAUDE_SUBSCRIPTION_REQUIRED }; }
+            if (auth === undefined) { throw new Error('CLI を起動できませんでした。実行ファイルと作業ディレクトリを確認してください。'); }
         }
-        let cwd = s.workingDirectory;
-        try {
-            if (!cwd) {
-                cwd = path.join(FileUri.fsPath(await this.envServer.getConfigDirUri()), 'arschat', 'cli-agents');
-                await fs.mkdir(cwd, { recursive: true });
-            }
-        } catch { throw new Error('CLI の作業ディレクトリを準備できませんでした。'); }
         if (token?.isCancellationRequested) { return { text: '' }; }
         let child;
         try { child = spawnCli(kind === 'codex-cli' ? s.codexCommand : s.claudeCommand, cliArguments(kind, s), env, cwd); }
@@ -93,7 +139,7 @@ export class CliAgentServiceImpl implements CliAgentService {
         const pid = child.pid;
         const decoder = new CliAgentDecoder(kind);
         const queue: LanguageModelStreamResponsePart[] = [];
-        const secrets = [env.ANTHROPIC_API_KEY].filter((v): v is string => !!v);
+        const secrets: string[] = [];
         const textRedactor = new CliStreamRedactor(secrets), thoughtRedactor = new CliStreamRedactor(secrets);
         const enqueue = (part: LanguageModelStreamResponsePart): void => {
             if ('content' in part) {

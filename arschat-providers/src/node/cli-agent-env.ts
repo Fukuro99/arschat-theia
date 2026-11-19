@@ -14,13 +14,13 @@ const RUNTIME_VARIABLES = new Set([
     'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS'
 ]);
 
-export function cliEnvironment(kind: CliAgentKind, source: NodeJS.ProcessEnv, apiKey?: string): NodeJS.ProcessEnv {
+export function cliEnvironment(kind: CliAgentKind, source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {};
     for (const [name, value] of Object.entries(source)) {
-        if (RUNTIME_VARIABLES.has(name.toUpperCase()) || (kind === 'codex-cli' && name === 'CODEX_HOME')) {
+        if (RUNTIME_VARIABLES.has(name.toUpperCase()) || (kind === 'codex-cli' && name === 'CODEX_HOME')
+            || (kind === 'claude-code-cli' && name === 'CLAUDE_CONFIG_DIR')) {
             env[name] = value;
         }
     }
-    if (kind === 'claude-code-cli' && apiKey) { env.ANTHROPIC_API_KEY = apiKey; }
     return env;
 }

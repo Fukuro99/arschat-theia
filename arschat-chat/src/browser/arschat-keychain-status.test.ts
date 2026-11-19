@@ -10,7 +10,7 @@ import { ArschatKeychainStatusService, arschatKeychainStatusPath } from 'arschat
 import providersModule from 'arschat-providers/lib/node/arschat-providers-backend-module';
 import { LanguageModelProvider } from '@theia/ai-core';
 import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
-import { CliAgentService, cliAgentServicePath, CLAUDE_KEY_REQUIRED } from 'arschat-providers/lib/common/cli-agents';
+import { CliAgentService, cliAgentServicePath, CLAUDE_LOGIN_REQUIRED, CLI_SETTINGS } from 'arschat-providers/lib/common/cli-agents';
 
 // Only this backend suite loads the real Theia class. Native keytar remains wholly synthetic.
 jest.unmock('@theia/core/lib/node/key-store-server');
@@ -53,13 +53,11 @@ it('contributes both CLI LanguageModels and a shared preflight RPC service', asy
     ]);
     const handler = container.getAll<any>(ConnectionHandler).find(h => h.path === cliAgentServicePath);
     expect(handler.targetFactory()).toBe(container.get(CliAgentService));
-    const saved = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    try {
-        expect(await models[1].request({ messages: [], sessionId: 's', requestId: 'r' })).toEqual({ text: CLAUDE_KEY_REQUIRED });
-    } finally {
-        if (saved === undefined) { delete process.env.ANTHROPIC_API_KEY; } else { process.env.ANTHROPIC_API_KEY = saved; }
-    }
+    const login = jest.spyOn(container.get(CliAgentService) as any, 'claudeAuth').mockResolvedValue('logged-out');
+    expect(await models[1].request({ messages: [], sessionId: 's', requestId: 'r',
+        settings: { [CLI_SETTINGS]: { workingDirectory: process.cwd() } } })).toEqual({ text: CLAUDE_LOGIN_REQUIRED });
+    expect(login).toHaveBeenCalledWith('claude', process.cwd());
+    expect(mockKeytar.getPassword).not.toHaveBeenCalled();
 });
 
 it('rebinds the core singleton and both RPC handlers resolve that same credential instance', async () => {

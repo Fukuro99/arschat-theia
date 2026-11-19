@@ -4,7 +4,7 @@ import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
-import { CliAgentService } from '../common/cli-agents';
+import { CLAUDE_SUBSCRIPTION_REQUIRED, CliAgentService } from '../common/cli-agents';
 import { readCliSettings } from './cli-agent-preferences';
 import { ProviderSwitchService, ARSCHAT_CHAT_AGENT_ID } from './provider-switch-service';
 
@@ -32,13 +32,15 @@ export class CliAgentAutotestContribution implements FrontendApplicationContribu
             for (const scenario of [
                 { kind: 'codex-cli' as const, name: 'codex-pong', prompt: 'Reply with exactly: PONG', expected: 'PONG' },
                 { kind: 'codex-cli' as const, name: 'codex-japanese', prompt: '日本の首都を漢字2文字で', expected: '東京' },
-                { kind: 'claude-code-cli' as const, name: 'claude-pong-or-key-required', prompt: 'Reply with exactly: PONG', expected: 'PONG' }
+                { kind: 'claude-code-cli' as const, name: 'claude-pong-or-login-required', prompt: 'Reply with exactly: PONG', expected: 'PONG' }
             ]) {
                 try {
                     const check = await this.cliService.check(scenario.kind, settings);
                     const selection = await this.switchService.setActive(scenario.kind);
                     if (selection?.modelId !== scenario.kind) { throw new Error('selection'); }
-                    const expected = scenario.kind === 'claude-code-cli' && check.keyAvailable === false ? 'API キーが必要' : scenario.expected;
+                    const expected = scenario.kind !== 'claude-code-cli' ? scenario.expected
+                        : check.loggedIn === false ? 'ログインしていません'
+                        : check.message === CLAUDE_SUBSCRIPTION_REQUIRED ? CLAUDE_SUBSCRIPTION_REQUIRED : scenario.expected;
                     const reply = await this.roundTrip(scenario.prompt, (settings.timeoutMinutes + 1) * 60000);
                     if (!reply.includes(expected)) { throw new Error('response'); }
                     pass++; this.log(`${scenario.name}: PASS`);
