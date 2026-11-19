@@ -19,7 +19,8 @@ export default new ContainerModule((bind, _unbind, isBound, rebind) => {
     bind(CliAgentService).toService(CliAgentServiceImpl);
     bind(LanguageModelProvider).toDynamicValue(ctx => async () => {
         const service = ctx.container.get(CliAgentServiceImpl);
-        return [new CliAgentLanguageModel('codex-cli', service), new CliAgentLanguageModel('claude-code-cli', service)];
+        return [new CliAgentLanguageModel('codex-cli', service), new CliAgentLanguageModel('claude-code-cli', service),
+            new CliAgentLanguageModel('opencode-cli', service)];
     });
     bind(ConnectionHandler).toDynamicValue(ctx => new RpcConnectionHandler(
         cliAgentServicePath, () => ctx.container.get<CliAgentService>(CliAgentService)

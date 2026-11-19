@@ -1,9 +1,10 @@
 import { PreferenceSchema } from '@theia/core/lib/common/preferences/preference-schema';
-import { CliAgentSettings, CLI_DEFAULTS, CLI_PREF, CODEX_SANDBOX_MODES, CLAUDE_PERMISSION_MODES, normalizeCliSettings } from '../common/cli-agents';
+import { CliAgentSettings, CLI_DEFAULTS, CLI_PREF, CODEX_SANDBOX_MODES, CLAUDE_PERMISSION_MODES, OPENCODE_AGENT_MODES, normalizeCliSettings } from '../common/cli-agents';
 
 export const CLI_PREFERENCE_KEYS: Record<keyof CliAgentSettings, string> = {
     codexCommand: 'codex.command', codexSandbox: 'codex.sandbox', codexModel: 'codex.model',
     claudeCommand: 'claudeCode.command', claudePermissionMode: 'claudeCode.permissionMode', claudeModel: 'claudeCode.model',
+    opencodeCommand: 'opencode.command', opencodeAgent: 'opencode.agent', opencodeModel: 'opencode.model',
     workingDirectory: 'workingDirectory', timeoutMinutes: 'timeoutMinutes'
 };
 export const cliAgentPreferenceSchema: PreferenceSchema = { properties: Object.fromEntries(
@@ -21,7 +22,13 @@ export const cliAgentPreferenceSchema: PreferenceSchema = { properties: Object.f
             markdownDescription: 'Claude Code の権限モード。**警告:** `bypassPermissions` は CLI がファイル削除・コマンド実行を確認なしで行えるモードです。'
         } : {}),
         ...(key === 'timeoutMinutes' ? { exclusiveMinimum: 0, maximum: 1440 } : {}),
-        description: `ArsChat CLI: ${CLI_PREFERENCE_KEYS[key]}`
+        ...(key === 'opencodeAgent' ? {
+            enum: [...OPENCODE_AGENT_MODES],
+            markdownDescription: 'OpenCode のエージェント。`plan` は読み取り中心で書き込みを拒否します。**警告:** `build` は OpenCode の権限設定に従い、既定ではファイル編集・コマンド実行を確認なしで行います。'
+        } : {}),
+        description: key === 'opencodeModel'
+            ? '`provider/model` 形式 (例: `edgexpert/qwen3.8-flash-next`)。空なら OpenCode の既定モデル。チャットヘッダーのモデル欄からも選べます。'
+            : `ArsChat CLI: ${CLI_PREFERENCE_KEYS[key]}`
     }])
 ) };
 export function readCliSettings(get: (key: string, fallback: unknown) => unknown): CliAgentSettings {

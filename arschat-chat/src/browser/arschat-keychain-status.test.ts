@@ -44,12 +44,13 @@ function backend() {
     return { container, store, status };
 }
 
-it('contributes both CLI LanguageModels and a shared preflight RPC service', async () => {
+it('contributes all CLI LanguageModels and a shared preflight RPC service', async () => {
     const { container } = backend();
     container.rebind(EnvVariablesServer).toConstantValue({ getConfigDirUri: async () => 'file:///unused' });
     const models = (await Promise.all(container.getAll<LanguageModelProvider>(LanguageModelProvider).map(provider => provider()))).flat();
     expect(models.map(model => [model.id, model.name, model.vendor])).toEqual([
-        ['codex-cli', 'Codex (CLI)', 'Codex (CLI)'], ['claude-code-cli', 'Claude Code (CLI)', 'Claude Code (CLI)']
+        ['codex-cli', 'Codex (CLI)', 'Codex (CLI)'], ['claude-code-cli', 'Claude Code (CLI)', 'Claude Code (CLI)'],
+        ['opencode-cli', 'OpenCode (CLI)', 'OpenCode (CLI)']
     ]);
     const handler = container.getAll<any>(ConnectionHandler).find(h => h.path === cliAgentServicePath);
     expect(handler.targetFactory()).toBe(container.get(CliAgentService));

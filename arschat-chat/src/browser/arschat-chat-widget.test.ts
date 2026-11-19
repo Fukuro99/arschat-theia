@@ -288,7 +288,7 @@ describe('ArschatChatWidget', () => {
             } as unknown as ToolInvocationRegistry);
             bind(ArschatUiInteractionService).toConstantValue(uiInteractionService);
             bind(ArschatChatWidget).toSelf();
-            bind(CliAgentService).toConstantValue({ check: jest.fn(async () => ({ available: true })) });
+            bind(CliAgentService).toConstantValue({ check: jest.fn(async () => ({ available: true })), listModels: jest.fn(async () => []) });
             bind(PreferenceService).toConstantValue({
                 get: (key: string, fallback: unknown) => cliPreferences.get(key) ?? fallback,
                 set: setPreference,
@@ -322,7 +322,7 @@ describe('ArschatChatWidget', () => {
         const groups = Array.from(element.container.querySelectorAll('#arschat-provider-select optgroup'));
         expect(groups.map(g => g.getAttribute('label'))).toEqual(['クラウド', 'ローカル', 'エージェント (CLI)']);
         expect(Array.from(groups[2].querySelectorAll('option')).map(o => [o.value, o.textContent])).toEqual([
-            ['codex-cli', 'Codex (CLI)'], ['claude-code-cli', 'Claude Code (CLI)']
+            ['codex-cli', 'Codex (CLI)'], ['claude-code-cli', 'Claude Code (CLI)'], ['opencode-cli', 'OpenCode (CLI)']
         ]);
     });
 
@@ -331,6 +331,102 @@ describe('ArschatChatWidget', () => {
         expect(setActiveCalls[setActiveCalls.length - 1]).toEqual({ provider: 'codex-cli', model: 'codex-cli' });
         expect(fetchCustomEndpointModels).not.toHaveBeenCalled();
         expect(render(widget.render()).container.querySelector('#arschat-custom-endpoint-url')).toBeNull();
+    });
+
+    it('loads OpenCode models once per provider switch and saves only the User model preference', async () => {
+        const w = asAny(widget);
+        w.cliAgentService.listModels.mockResolvedValue(['edgexpert/qwen3.8-flash-next', 'opencode/big-pickle']);
+        await act(async () => { await w.onProviderChange('opencode-cli'); });
+        const ui = render(widget.render());
+        const select = ui.container.querySelector('#arschat-model-select') as HTMLSelectElement;
+        expect(Array.from(select.options).map(o => [o.value, o.textContent])).toEqual([
+            ['', '(OpenCode の既定)'], ['edgexpert/qwen3.8-flash-next', 'edgexpert/qwen3.8-flash-next'], ['opencode/big-pickle', 'opencode/big-pickle']
+        ]);
+        expect(select.value).toBe('');
+        const switches = setActiveCalls.length;
+        await act(async () => { fireEvent.change(select, { target: { value: 'edgexpert/qwen3.8-flash-next' } }); });
+        expect(setPreference).toHaveBeenLastCalledWith('arschat.cliAgents.opencode.model', 'edgexpert/qwen3.8-flash-next', PreferenceScope.User);
+        expect(setActiveCalls).toHaveLength(switches);
+        expect(activeModel).toBe('opencode-cli');
+        ui.rerender(widget.render());
+        expect(select.value).toBe('edgexpert/qwen3.8-flash-next');
+        fireEvent.focus(select); fireEvent.mouseDown(select);
+        await act(async () => { await w.onProviderChange('opencode-cli'); });
+        expect(w.cliAgentService.listModels).toHaveBeenCalledTimes(1);
+        await act(async () => { fireEvent.change(select, { target: { value: '' } }); });
+        expect(setPreference).toHaveBeenLastCalledWith('arschat.cliAgents.opencode.model', '', PreferenceScope.User);
+        expect(fetchCustomEndpointModels).not.toHaveBeenCalled();
+    });
+
+    it('serializes OpenCode discovery across rapid switches and ignores stale results', async () => {
+        const w = asAny(widget);
+        let first!: (models: string[]) => void, second!: (models: string[]) => void;
+        w.cliAgentService.listModels.mockImplementationOnce(() => new Promise(resolve => { first = resolve; }))
+            .mockImplementationOnce(() => new Promise(resolve => { second = resolve; }));
+        await act(async () => { await w.onProviderChange('opencode-cli'); });
+        const ui = render(widget.render());
+        expect(ui.queryByText('(取得中...)')).toBeTruthy();
+        expect((ui.container.querySelector('#arschat-model-select') as HTMLSelectElement).disabled).toBe(true);
+        await act(async () => {
+            await w.onProviderChange('codex-cli');
+            await w.onProviderChange('opencode-cli');
+            await w.onProviderChange('opencode-cli');
+        });
+        expect(w.cliAgentService.listModels).toHaveBeenCalledTimes(1);
+        await act(async () => { first(['stale/model']); });
+        expect(w.cliAgentService.listModels).toHaveBeenCalledTimes(2);
+        ui.rerender(widget.render());
+        expect(ui.queryByText('stale/model')).toBeNull();
+        expect(ui.queryByText('(取得中...)')).toBeTruthy();
+        await act(async () => { second(['current/model']); });
+        ui.rerender(widget.render());
+        expect(ui.queryByText('current/model')).toBeTruthy();
+        expect(ui.queryByText('stale/model')).toBeNull();
+        expect((ui.container.querySelector('#arschat-model-select') as HTMLSelectElement).disabled).toBe(false);
+    });
+
+    it.each([false, true])('shows empty OpenCode discovery (RPC error: %s) while preserving the configured model', async failed => {
+        const w = asAny(widget);
+        cliPreferences.set('arschat.cliAgents.opencode.model', 'configured/model');
+        if (failed) { w.cliAgentService.listModels.mockRejectedValue(new Error('private')); }
+        await act(async () => { await w.onProviderChange('opencode-cli'); });
+        const ui = render(widget.render());
+        expect(ui.queryByText('(モデルが見つかりません)')).toBeTruthy();
+        const select = ui.container.querySelector('#arschat-model-select') as HTMLSelectElement;
+        expect(select.value).toBe('configured/model');
+        expect(select.disabled).toBe(false);
+        cliPreferences.set('arschat.cliAgents.opencode.model', 'changed/model');
+        preferenceChanged({ preferenceName: 'arschat.cliAgents.opencode.model' });
+        ui.rerender(widget.render());
+        expect(select.value).toBe('changed/model');
+        expect(w.cliAgentService.listModels).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([false, true])('requires confirmation for OpenCode build and warns only after approval (%s)', async approved => {
+        const open = jest.spyOn(ConfirmDialog.prototype, 'open').mockImplementation(function (this: ConfirmDialog) {
+            expect((this as any).props.msg).toContain('build');
+            this.dispose();
+            return Promise.resolve(approved);
+        });
+        try {
+            const w = asAny(widget);
+            w.provider = 'opencode-cli';
+            const ui = render(widget.render());
+            const select = ui.getByLabelText('権限') as HTMLSelectElement;
+            expect(Array.from(select.options).map(o => o.value)).toEqual(['plan', 'build']);
+            expect(select.value).toBe('plan');
+            await act(async () => { fireEvent.change(select, { target: { value: 'build' } }); });
+            expect(open).toHaveBeenCalledTimes(1);
+            ui.rerender(widget.render());
+            expect(select.value).toBe(approved ? 'build' : 'plan');
+            expect(select.classList.contains('arschat-cli-permission-warning')).toBe(approved);
+            if (approved) {
+                expect(setPreference).toHaveBeenLastCalledWith('arschat.cliAgents.opencode.agent', 'build', PreferenceScope.User);
+                await act(async () => { fireEvent.change(select, { target: { value: 'plan' } }); });
+                expect(open).toHaveBeenCalledTimes(1);
+                expect(setPreference).toHaveBeenLastCalledWith('arschat.cliAgents.opencode.agent', 'plan', PreferenceScope.User);
+            } else { expect(setPreference).not.toHaveBeenCalled(); }
+        } finally { open.mockRestore(); }
     });
 
     it.each(['anthropic', 'openai', 'lmstudio', 'ollama', 'vllm', 'llamacpp', 'unsloth', 'openai-compatible'])(

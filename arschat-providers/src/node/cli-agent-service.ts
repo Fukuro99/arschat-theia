@@ -18,6 +18,10 @@ export function cliArguments(kind: CliAgentKind, s: CliAgentSettings): string[] 
         return ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-s', s.codexSandbox,
             ...(s.codexModel ? ['-m', s.codexModel] : []), '-'];
     }
+    if (kind === 'opencode-cli') {
+        return ['run', '--format', 'json', '--thinking', '--agent', s.opencodeAgent,
+            ...(s.opencodeModel ? ['-m', s.opencodeModel] : [])];
+    }
     // Installed Claude 2.1.273 calls the ordinary permission mode "manual".
     return ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
         '--permission-mode', s.claudePermissionMode === 'default' ? 'manual' : s.claudePermissionMode,
@@ -95,7 +99,7 @@ export class CliAgentServiceImpl implements CliAgentService {
         const available = await new Promise<boolean>(resolve => {
             try {
                 const versionEnv = cliEnvironment(kind, process.env);
-                const child = spawnCli(kind === 'codex-cli' ? s.codexCommand : s.claudeCommand, ['--version'], versionEnv);
+                const child = spawnCli(kind === 'codex-cli' ? s.codexCommand : s.opencodeCommand, ['--version'], versionEnv);
                 const pid = child.pid;
                 let settled = false;
                 const finish = (ok: boolean): void => {
@@ -114,7 +118,49 @@ export class CliAgentServiceImpl implements CliAgentService {
             } catch { resolve(false); }
         });
         return { available, message: available ? undefined
-            : 'CLI が見つからないか起動できません。インストール: npm i -g @openai/codex' };
+            : `CLI が見つからないか起動できません。インストール: npm i -g ${kind === 'opencode-cli' ? 'opencode-ai' : '@openai/codex'}` };
+    }
+
+    async listModels(kind: CliAgentKind, raw: CliAgentSettings): Promise<string[]> {
+        if (kind !== 'opencode-cli') { return []; }
+        const s = normalizeCliSettings(raw);
+        try {
+            const cwd = await this.workingDirectory(s);
+            return await new Promise<string[]>(resolve => {
+                const child = spawnCli(s.opencodeCommand, ['models'], cliEnvironment(kind, process.env), cwd);
+                const pid = child.pid;
+                let settled = false, bytes = 0;
+                const chunks: Buffer[] = [];
+                const finish = (models?: string[]): void => {
+                    if (settled) { return; }
+                    settled = true; clearTimeout(timer);
+                    if (models === undefined) { killCliTree(child, pid); }
+                    destroyCliPipes(child);
+                    chunks.length = 0;
+                    resolve(models ?? []);
+                };
+                const timer = setTimeout(() => finish(), 20000);
+                child.stdout?.on('data', (chunk: Buffer) => {
+                    if (settled) { return; }
+                    bytes += chunk.length;
+                    if (bytes > 1024 * 1024) { finish(); return; }
+                    chunks.push(chunk);
+                });
+                child.stdout?.on('error', () => finish());
+                child.stderr?.on('error', () => finish());
+                child.stderr?.resume();
+                child.stdin?.on('error', () => finish());
+                child.on('error', () => finish());
+                child.on('exit', (code, signal) => { if (code !== 0 || signal) { finish(); } });
+                child.on('close', (code, signal) => {
+                    if (settled) { return; }
+                    if (code !== 0 || signal) { finish(); return; }
+                    finish(Buffer.concat(chunks).toString('utf8').split(/\r?\n/)
+                        .map(line => line.trim()).filter(line => /^[^\s/]+\/\S.*$/.test(line)));
+                });
+                try { child.stdin?.end(); } catch { finish(); }
+            });
+        } catch { return []; }
     }
 
     async request(kind: CliAgentKind, request: UserRequest, token?: CancellationToken): Promise<LanguageModelResponse> {
@@ -133,7 +179,8 @@ export class CliAgentServiceImpl implements CliAgentService {
         }
         if (token?.isCancellationRequested) { return { text: '' }; }
         let child;
-        try { child = spawnCli(kind === 'codex-cli' ? s.codexCommand : s.claudeCommand, cliArguments(kind, s), env, cwd); }
+        try { child = spawnCli(kind === 'codex-cli' ? s.codexCommand : kind === 'opencode-cli' ? s.opencodeCommand : s.claudeCommand,
+            cliArguments(kind, s), env, cwd); }
         catch { throw new Error('CLI を起動できませんでした。実行ファイルと作業ディレクトリを確認してください。'); }
         const processChild = child;
         const pid = child.pid;
@@ -206,6 +253,7 @@ export class CliAgentServiceImpl implements CliAgentService {
         processChild.on('close', (code, signal) => {
             if (code !== 0 || signal) { finish(new Error('CLI が正常な完了通知なしで終了しました。'), true); return; }
             if (pending) { line(pending); pending = ''; }
+            decoder.close();
             finish(decoder.done ? undefined : new Error('CLI が正常な完了通知なしで終了しました。'), !decoder.done, decoder.done);
         });
         timer = setTimeout(() => finish(new Error('CLI のリクエストがタイムアウトしました。'), true), s.timeoutMinutes * 60000);
@@ -241,7 +289,7 @@ export class CliAgentLanguageModel implements LanguageModel {
     readonly name: string;
     readonly vendor: string;
     constructor(readonly id: CliAgentKind, private readonly service: CliAgentServiceImpl) {
-        this.name = this.vendor = id === 'codex-cli' ? 'Codex (CLI)' : 'Claude Code (CLI)';
+        this.name = this.vendor = id === 'codex-cli' ? 'Codex (CLI)' : id === 'opencode-cli' ? 'OpenCode (CLI)' : 'Claude Code (CLI)';
     }
     request(request: UserRequest, cancellationToken?: CancellationToken): Promise<LanguageModelResponse> {
         return this.service.request(this.id, request, cancellationToken);

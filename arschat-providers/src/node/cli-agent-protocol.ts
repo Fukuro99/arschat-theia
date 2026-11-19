@@ -20,7 +20,7 @@ interface ClaudeBlock {
 }
 
 export class CliAgentOutputError extends Error {
-    constructor() { super('CLI の出力を解釈できませんでした'); }
+    constructor(message = 'CLI の出力を解釈できませんでした') { super(message); }
 }
 
 /** Incremental JSONL decoder. Complete assistant/result snapshots must not duplicate deltas. */
@@ -29,7 +29,37 @@ export class CliAgentDecoder {
     private messageId: string | undefined;
     private readonly blocks = new Map<number, ClaudeBlock>();
     private activeIndex: number | undefined;
+    private opencodeStepFinished = false;
+    private readonly opencodeParts = new Map<string, string>();
+    private readonly opencodeLastParts = new Map<string, string>();
     constructor(private readonly kind: CliAgentKind) {}
+
+    /** OpenCode has no final event: only a successful process close completes it. */
+    close(): void {
+        if (this.kind === 'opencode-cli' && this.opencodeStepFinished) { this.done = true; }
+    }
+
+    private decodeOpenCode(e: any): LanguageModelStreamResponsePart[] {
+        if (e.type === 'error') {
+            throw new CliAgentOutputError('OpenCode がエラーを返しました。モデル名・接続先・認証を確認してください。');
+        }
+        if (e.type === 'step_finish') { this.opencodeStepFinished = true; return []; }
+        const part = e.part;
+        const thought = e.type === 'reasoning' && part?.type === 'reasoning';
+        if (e.type !== 'text' && !thought) { return []; }
+        if (typeof part?.text !== 'string' || typeof part.id !== 'string') { return []; }
+        const channel = thought ? 'thought' : 'text';
+        const key = `${channel}:${part.id}`;
+        const previous = this.opencodeParts.get(key) ?? '';
+        if (!part.text.startsWith(previous)) { return []; }
+        const suffix = part.text.slice(previous.length);
+        this.opencodeParts.set(key, part.text);
+        if (!suffix) { return []; }
+        const last = this.opencodeLastParts.get(channel);
+        const value = (last !== undefined && last !== key ? '\n\n' : '') + suffix;
+        this.opencodeLastParts.set(channel, key);
+        return thought ? [{ thought: value, signature: '' }] : [{ content: value }];
+    }
 
     private startMessage(id?: string): void {
         if (this.hasUnverifiedBlocks()) {
@@ -78,6 +108,7 @@ export class CliAgentDecoder {
             throw new CliAgentOutputError();
         }
         if (!e || typeof e !== 'object') { return []; }
+        if (this.kind === 'opencode-cli') { return this.decodeOpenCode(e); }
         if (e.type === 'error' || e.type === 'turn.failed') { throw new Error('CLI がエラーを返しました。ログイン・接続・利用枠を確認してください。'); }
         if (this.kind === 'codex-cli') {
             if (e.type === 'turn.completed') { this.done = true; return []; }

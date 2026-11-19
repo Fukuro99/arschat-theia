@@ -1578,3 +1578,16 @@ Codex レビューは 5 巡で収束 (blocker 4 / should-fix 9 を修正)。判�
 - 検証: providers / chat / agents の build green、jest は arschat-chat 370 PASS・arschat-agents 116 PASS (既存スキップ 1)。Electron 実機 `ARSCHAT_CLI_AGENTS_AUTOTEST=1` で **3 PASS / 0 FAIL** (codex の PONG・東京。Claude は未ログイン環境で `-p` を起動せず「ログインしていません」を返す)。
 - 注意: 自分のマシンで自分のログインを使う個人利用は、スクリプトから `claude -p` を呼ぶのと同じ扱い。ArsChat を配布して「Claude のサブスクリプションで動く」機能として他人に提供する形は、Anthropic が第三者製品に対して制限している (事前承認がない限り claude.ai ログイン・利用枠の提供は不可)。配布時に要再検討。
 - 未確認 (ユーザー確認待ち): ログイン済み状態での Claude Code (CLI) の実応答。
+
+## OpenCode (CLI) プロバイダ追加 (2026-11-19)
+
+OpenCode 経由で Edge の Qwen (`edgexpert/qwen3.8-flash-next`) などを動かすため、CLI エージェントの 3 つ目として OpenCode (CLI) を追加した。ブリーフ (実測した出力形式を含む): [docs/briefs/OPENCODE_CLI_BRIEF.md](docs/briefs/OPENCODE_CLI_BRIEF.md)。
+
+- 起動: `opencode run --format json --thinking --agent <plan|build> [-m provider/model]`、会話は stdin。OpenCode 1.18.2 で確認。
+- 終了判定: OpenCode には完了イベントが無いので、「close code 0・error イベントなし・step_finish を 1 回以上」で成功。途中の step_finish ではプロセスを止めない (ツール使用後に次のステップが続くため)。
+- 出力: `text` パートは差分ではなく全体なので part id で重複を除き、パート間に空行を入れる。`reasoning` は思考、`tool_use` は表示しない。`error` は固定メッセージ。
+- 権限: ヘッダーの「権限」で `plan` (既定。書き込みツールは拒否される) / `build` (OpenCode の権限設定に従う。既定ではファイル編集・コマンド実行を確認なしで行うので確認ダイアログ + 警告色)。
+- モデル: ヘッダーのモデル欄に `opencode models` の一覧を出し、選んだ値を `arschat.cliAgents.opencode.model` (User スコープ) に保存。空なら OpenCode の既定モデル。
+- 環境: 許可リストに加えて `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` / `XDG_*_HOME` だけ通す。各社 API キーの環境変数は渡さないので、OpenCode 側で環境変数参照のキーを使うプロバイダは `opencode auth login` で保存する必要がある。
+- 既知事項: `opencode run` は毎回 OpenCode 側の DB にセッションを保存する (ephemeral オプションが無い)。
+- 検証: providers / chat / agents の build green、jest は arschat-chat 411 PASS・arschat-agents 116 PASS (既存スキップ 1)。Codex レビュー 1 巡で「問題なし」。Electron 実機 `ARSCHAT_CLI_AGENTS_AUTOTEST=1` + `ARSCHAT_OPENCODE_AUTOTEST_MODEL=edgexpert/qwen3.8-flash-next` で **6 PASS / 0 FAIL** (codex 2・claude 未ログイン案内・opencode のモデル一覧・Qwen の PONG・Qwen の東京)。

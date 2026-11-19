@@ -77,7 +77,8 @@ export type ArschatProviderKind =
     | 'unsloth'
     | 'openai-compatible'
     | 'codex-cli'
-    | 'claude-code-cli';
+    | 'claude-code-cli'
+    | 'opencode-cli';
 
 /** One entry of the shared `ai-features.openAiCustom.customOpenAiModels` array. */
 export interface CustomOpenAiModelEntry {
@@ -178,7 +179,8 @@ export const PROVIDERS: readonly ArschatProviderDescriptor[] = [
         local: true
     },
     { kind: 'codex-cli', label: 'Codex (CLI)', modelIdFor: () => 'codex-cli', fixedModelId: 'codex-cli', group: 'cli' },
-    { kind: 'claude-code-cli', label: 'Claude Code (CLI)', modelIdFor: () => 'claude-code-cli', fixedModelId: 'claude-code-cli', group: 'cli' }
+    { kind: 'claude-code-cli', label: 'Claude Code (CLI)', modelIdFor: () => 'claude-code-cli', fixedModelId: 'claude-code-cli', group: 'cli' },
+    { kind: 'opencode-cli', label: 'OpenCode (CLI)', modelIdFor: () => 'opencode-cli', fixedModelId: 'opencode-cli', group: 'cli' }
 ];
 
 export function providerByKind(kind: string): ArschatProviderDescriptor | undefined {

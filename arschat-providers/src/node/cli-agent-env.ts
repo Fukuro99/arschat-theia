@@ -14,11 +14,16 @@ const RUNTIME_VARIABLES = new Set([
     'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS'
 ]);
 
+const OPENCODE_VARIABLES = new Set([
+    'OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME'
+]);
+
 export function cliEnvironment(kind: CliAgentKind, source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {};
     for (const [name, value] of Object.entries(source)) {
         if (RUNTIME_VARIABLES.has(name.toUpperCase()) || (kind === 'codex-cli' && name === 'CODEX_HOME')
-            || (kind === 'claude-code-cli' && name === 'CLAUDE_CONFIG_DIR')) {
+            || (kind === 'claude-code-cli' && name === 'CLAUDE_CONFIG_DIR')
+            || (kind === 'opencode-cli' && OPENCODE_VARIABLES.has(name))) {
             env[name] = value;
         }
     }

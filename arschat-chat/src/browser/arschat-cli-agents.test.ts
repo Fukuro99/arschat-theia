@@ -7,7 +7,7 @@ import { promises as fs, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } fro
 import { tmpdir } from 'os';
 import * as path from 'path';
 import { FileUri } from '@theia/core/lib/common/file-uri';
-import { CancellationTokenSource } from '@theia/core';
+import { CancellationTokenSource, PreferenceScope } from '@theia/core';
 import { LanguageModelResponse, LanguageModelStreamResponsePart, UserRequest } from '@theia/ai-core';
 import { CliAgentServiceImpl, cliArguments } from 'arschat-providers/lib/node/cli-agent-service';
 import { CliAgentDecoder, cliTranscript } from 'arschat-providers/lib/node/cli-agent-protocol';
@@ -32,7 +32,7 @@ class FakeChild extends EventEmitter {
 function request(settings = {}): UserRequest {
     return { sessionId: 's', requestId: 'r', messages: [{ type: 'text', actor: 'user', text: '日本語 " & echo secret' }],
         settings: { [CLI_SETTINGS]: { ...CLI_DEFAULTS, codexCommand: process.execPath, claudeCommand: process.execPath,
-            workingDirectory: process.cwd(), ...settings } } };
+            opencodeCommand: process.execPath, workingDirectory: process.cwd(), ...settings } } };
 }
 async function collect(response: LanguageModelResponse): Promise<LanguageModelStreamResponsePart[]> {
     if (!('stream' in response)) { return [{ content: 'text' in response ? response.text : response.content }]; }
@@ -68,6 +68,126 @@ describe('CLI backend (synthetic child_process.spawn only)', () => {
     afterEach(() => {
         process.env = savedEnv; jest.useRealTimers(); jest.restoreAllMocks();
         expect(getPassword).not.toHaveBeenCalled();
+    });
+
+    const opencodeFixtures = [
+        { name: 'PONG', text: 'PONG', events: [
+            { type: 'step_start', part: { type: 'step-start' } },
+            { type: 'text', part: { id: 'pong', type: 'text', text: 'PONG' } },
+            { type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } }
+        ] },
+        { name: 'tool followed by text', text: '確認します\n\n東京', events: [
+            { type: 'step_start', part: { type: 'step-start' } },
+            { type: 'text', part: { id: 'before', type: 'text', text: '確認します' } },
+            { type: 'tool_use', part: { type: 'tool', tool: 'bash', state: { status: 'completed', title: 'ls' } } },
+            { type: 'step_finish', part: { type: 'step-finish', reason: 'tool-calls' } },
+            { type: 'step_start', part: { type: 'step-start' } },
+            { type: 'text', part: { id: 'after', type: 'text', text: '東京' } },
+            { type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } }
+        ] },
+        { name: 'plan permission rejection', text: '', events: [
+            { type: 'step_start', part: { type: 'step-start' } },
+            { type: 'tool_use', part: { type: 'tool', tool: 'write', state: { status: 'error', error: 'The user rejected permission' } } },
+            { type: 'step_finish', part: { type: 'step-finish', reason: 'tool-calls' } }
+        ] }
+    ];
+    it.each(opencodeFixtures)('waits for close without killing OpenCode: $name', async fixture => {
+        const output = collect(await service.request('opencode-cli', request()));
+        const decoder = new CliAgentDecoder('opencode-cli');
+        for (const event of fixture.events) {
+            decoder.decode(JSON.stringify(event));
+            child.json(event);
+            expect(decoder.done).toBe(false);
+            expect(mockedSpawn).toHaveBeenCalledTimes(1);
+            expect(process.kill).not.toHaveBeenCalled();
+            expect(child.stdout.destroyed).toBe(false);
+        }
+        child.emit('exit', 0, null);
+        expect(child.stdout.destroyed).toBe(false);
+        child.emit('close', 0, null);
+        decoder.close();
+        expect(decoder.done).toBe(true);
+        expect((await output).map(p => 'content' in p ? p.content : '').join('')).toBe(fixture.text);
+        expect(mockedSpawn).toHaveBeenCalledTimes(1);
+        expect(jest.getTimerCount()).toBe(0);
+        expect(child.stdin.destroy).toHaveBeenCalled();
+    });
+    it('decodes the final OpenCode line without a newline on close', async () => {
+        const output = collect(await service.request('opencode-cli', request()));
+        child.json({ type: 'text', part: { id: 'a', text: 'PONG' } });
+        child.stdout.write('{"type":"step_finish","part":{"reason":"stop"}}');
+        child.emit('close', 0, null);
+        expect(await output).toEqual([{ content: 'PONG' }]);
+    });
+    it.each(['missing-step', 'error', 'broken-json', 'nonzero', 'signal'])('rejects OpenCode failure: %s', async failure => {
+        const output = collect(await service.request('opencode-cli', request()));
+        if (failure !== 'missing-step') { child.json({ type: 'step_finish' }); }
+        if (failure === 'error') { child.json({ type: 'error', error: { data: { message: 'private-secret' } } }); }
+        if (failure === 'broken-json') { child.stdout.write('broken-json\n'); }
+        child.emit('close', failure === 'nonzero' ? 1 : 0, failure === 'signal' ? 'SIGTERM' : null);
+        await expect(output).rejects.toThrow(failure === 'error'
+            ? 'OpenCode がエラーを返しました。モデル名・接続先・認証を確認してください。'
+            : failure === 'broken-json' ? 'CLI の出力を解釈できませんでした' : 'CLI が正常な完了通知なしで終了しました。');
+        expect(child.stdout.destroyed).toBe(true);
+        expect(jest.getTimerCount()).toBe(0);
+    });
+    const modelSettings = { ...CLI_DEFAULTS, opencodeCommand: process.execPath, workingDirectory: process.cwd() };
+    it('lists trimmed OpenCode models and drops noise, using the resolved cwd and filtered environment', async () => {
+        const result = service.listModels('opencode-cli', modelSettings);
+        await Promise.resolve();
+        const bytes = Buffer.from('  edgexpert/qwen3.8-flash-next\r\n\nnoise\nprovider/\n/invalid\nbad provider/model\n 日本語/モデル \n');
+        child.stdout.write(bytes.subarray(0, bytes.length - 4));
+        child.stdout.write(bytes.subarray(bytes.length - 4));
+        child.stderr.write('secret');
+        child.emit('close', 0, null);
+        expect(await result).toEqual(['edgexpert/qwen3.8-flash-next', '日本語/モデル']);
+        expect(mockedSpawn.mock.calls[0]).toEqual([process.execPath, ['models'], expect.objectContaining({
+            cwd: process.cwd(), env: cliEnvironment('opencode-cli', process.env)
+        })]);
+        expect(child.stdout.destroyed).toBe(true);
+        expect(child.stdin.destroy).toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(0);
+    });
+    it.each(['timeout', 'spawn-error', 'throw', 'overflow', 'exit', 'signal', 'stdout-error', 'stdin-error', 'stderr-error'])(
+        'returns no models and cleans up on %s', async failure => {
+            if (failure === 'throw') { mockedSpawn.mockImplementationOnce(() => { throw new Error('private'); }); }
+            const result = service.listModels('opencode-cli', modelSettings);
+            await Promise.resolve();
+            if (failure === 'timeout') { jest.advanceTimersByTime(20000); }
+            if (failure === 'spawn-error') { child.emit('error', new Error('private')); }
+            if (failure === 'overflow') { child.stdout.write(Buffer.alloc(1024 * 1024 + 1)); }
+            if (failure === 'exit') { child.emit('exit', 1, null); }
+            if (failure === 'signal') { child.emit('close', 0, 'SIGTERM'); }
+            if (failure === 'stdout-error') { child.stdout.emit('error', new Error('private')); }
+            if (failure === 'stdin-error') { child.stdin.emit('error', new Error('private')); }
+            if (failure === 'stderr-error') { child.stderr.emit('error', new Error('private')); }
+            expect(await result).toEqual([]);
+            if (failure !== 'throw') {
+                expect(child.stdout.destroyed).toBe(true);
+                expect(child.stdin.destroy).toHaveBeenCalled();
+            }
+            expect(jest.getTimerCount()).toBe(0);
+        });
+    it('does not spawn model discovery for Codex or Claude', async () => {
+        expect(await service.listModels('codex-cli', CLI_DEFAULTS)).toEqual([]);
+        expect(await service.listModels('claude-code-cli', CLI_DEFAULTS)).toEqual([]);
+        expect(mockedSpawn).not.toHaveBeenCalled();
+    });
+    it('resolves the shared default working directory for OpenCode model discovery', async () => {
+        const cwd = jest.spyOn(service as any, 'workingDirectory').mockResolvedValue(process.cwd());
+        const result = service.listModels('opencode-cli', { ...modelSettings, workingDirectory: '' });
+        await Promise.resolve();
+        child.emit('close', 0, null);
+        expect(await result).toEqual([]);
+        expect(cwd).toHaveBeenCalledWith(expect.objectContaining({ workingDirectory: '' }));
+        expect(mockedSpawn.mock.calls[0][2].cwd).toBe(process.cwd());
+    });
+    it.each([0, 1])('checks OpenCode with --version (exit %s)', async code => {
+        const result = service.check('opencode-cli', modelSettings);
+        child.emit('close', code, null);
+        expect(await result).toEqual({ available: code === 0, message: code === 0 ? undefined
+            : 'CLI が見つからないか起動できません。インストール: npm i -g opencode-ai' });
+        expect(mockedSpawn.mock.calls[0][1]).toEqual(['--version']);
     });
 
     it('streams codex text, thinking and operation names while excluding command output and patches', async () => {
@@ -647,7 +767,7 @@ it('ignores blank lines and unknown JSON events, supports result-only Claude res
     expect(decoder.done).toBe(true);
 });
 it('keeps the full provider ordering and excludes CLI from custom endpoint seeding', async () => {
-    expect(PROVIDERS.map(p => p.kind)).toEqual(['anthropic', 'openai', 'lmstudio', 'ollama', 'vllm', 'llamacpp', 'unsloth', 'openai-compatible', 'codex-cli', 'claude-code-cli']);
+    expect(PROVIDERS.map(p => p.kind)).toEqual(['anthropic', 'openai', 'lmstudio', 'ollama', 'vllm', 'llamacpp', 'unsloth', 'openai-compatible', 'codex-cli', 'claude-code-cli', 'opencode-cli']);
     expect(customEndpointProviders().some(p => p.group === 'cli')).toBe(false);
     const prefs = new Map();
     const service: any = new ProviderSwitchService();
@@ -691,8 +811,86 @@ it.each([CLAUDE_LOGIN_REQUIRED, CLAUDE_SUBSCRIPTION_REQUIRED])('autotest is opt-
     });
     await c.run();
     expect(c.log).toHaveBeenCalledWith('claude-pong-or-login-required: PASS');
+    expect(c.log).toHaveBeenCalledWith('opencode: SKIP');
     expect(c.log).toHaveBeenLastCalledWith('SUMMARY 3 PASS / 0 FAIL');
     expect(c.switchService.setActive).toHaveBeenLastCalledWith('openai', 'saved');
+});
+
+describe('OpenCode settings and protocol', () => {
+    it.each(['plan', 'build'] as const)('passes the %s agent with optional model', opencodeAgent => {
+        for (const opencodeModel of ['', 'edgexpert/qwen3.8-flash-next']) {
+            expect(cliArguments('opencode-cli', normalizeCliSettings({ opencodeAgent, opencodeModel })))
+                .toEqual(['run', '--format', 'json', '--thinking', '--agent', opencodeAgent,
+                    ...(opencodeModel ? ['-m', opencodeModel] : [])]);
+        }
+    });
+    it.each(['invalid', '', null, 0, {}])('defaults invalid agent %j to plan', opencodeAgent => {
+        expect(normalizeCliSettings({ opencodeAgent })).toEqual(CLI_DEFAULTS);
+    });
+    it('normalizes command/model preferences and defines safe permission defaults', () => {
+        expect(normalizeCliSettings({ opencodeCommand: ' ', opencodeModel: ' provider/model ' }))
+            .toMatchObject({ opencodeCommand: 'opencode', opencodeModel: 'provider/model' });
+        expect(cliAgentPreferenceSchema.properties['arschat.cliAgents.opencode.agent'])
+            .toMatchObject({ default: 'plan', enum: ['plan', 'build'], markdownDescription: expect.stringContaining('警告') });
+    });
+    it('only passes the six OpenCode configuration paths to OpenCode, never API credentials', () => {
+        const names = ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME'];
+        const paths = Object.fromEntries(names.map(n => [n, 'path']));
+        const source = { ...paths, OPENAI_API_KEY: 'secret', ANTHROPIC_API_KEY: 'secret', OPENCODE_CONFIG_CONTENT: 'secret' };
+        expect(cliEnvironment('opencode-cli', source)).toEqual(paths);
+        expect(cliEnvironment('codex-cli', source)).toEqual({});
+        expect(cliEnvironment('claude-code-cli', source)).toEqual({});
+    });
+    it('deduplicates and extends text/reasoning snapshots independently and separates parts', () => {
+        const decoder = new CliAgentDecoder('opencode-cli');
+        const decode = (type: string, id: string, text: string) => decoder.decode(JSON.stringify({ type, part: { type, id, text } }));
+        expect(decode('text', 'a', 'PO')).toEqual([{ content: 'PO' }]);
+        expect(decode('text', 'a', 'PO')).toEqual([]);
+        expect(decode('text', 'a', 'PONG')).toEqual([{ content: 'NG' }]);
+        expect(decode('text', 'a', 'changed')).toEqual([]);
+        expect(decode('text', 'a', 'PONG!')).toEqual([{ content: '!' }]);
+        expect(decode('text', 'b', '東京')).toEqual([{ content: '\n\n東京' }]);
+        expect(decode('reasoning', 'a', '考')).toEqual([{ thought: '考', signature: '' }]);
+        expect(decode('reasoning', 'a', '考え')).toEqual([{ thought: 'え', signature: '' }]);
+        expect(decode('reasoning', 'a', '考え')).toEqual([]);
+        expect(decode('reasoning', 'a', '変更')).toEqual([]);
+        expect(decode('reasoning', 'b', '次')).toEqual([{ thought: '\n\n次', signature: '' }]);
+        expect(decode('tool_use', 'tool', 'private output')).toEqual([]);
+        expect(decode('unknown', 'c', 'ignored')).toEqual([]);
+        expect(decoder.decode('{"type":"reasoning","part":{"type":"text","id":"c","text":"ignored"}}')).toEqual([]);
+    });
+});
+
+it.each([false, true])('runs all three opt-in OpenCode autotests and restores preferences even on failure (%s)', failed => {
+    const c: any = new CliAgentAutotestContribution();
+    const initial = new Map<string, unknown>([['arschat.cliAgents.opencode.model', 'saved/model']]);
+    const prefs = new Map(initial);
+    const set = jest.fn(async (key: string, value: unknown) => {
+        if (value === undefined) { prefs.delete(key); } else { prefs.set(key, value); }
+    });
+    const roundTrip = jest.fn().mockResolvedValueOnce('PONG').mockResolvedValueOnce('東京').mockResolvedValueOnce('PONG')
+        .mockResolvedValueOnce(failed ? 'wrong' : 'PONG').mockResolvedValueOnce('東京');
+    Object.assign(c, {
+        envServer: { getValue: async () => ({ value: 'edgexpert/qwen3.8-flash-next' }) },
+        preferences: { ready: Promise.resolve(), get: (key: string, fallback: unknown) => prefs.get(key) ?? fallback,
+            inspect: (key: string) => ({ globalValue: prefs.get(key) }), set },
+        switchService: { getActiveProvider: () => 'openai', getActiveModel: () => 'saved',
+            setActive: jest.fn(async (kind: string) => ({ modelId: kind })) },
+        cliService: { check: async () => ({ available: true }), listModels: jest.fn(async () => ['edgexpert/qwen3.8-flash-next']) },
+        roundTrip, log: jest.fn()
+    });
+    return c.run().then(() => {
+        expect(c.cliService.listModels).toHaveBeenCalledWith('opencode-cli', expect.objectContaining({
+            opencodeAgent: 'plan', opencodeModel: 'edgexpert/qwen3.8-flash-next'
+        }));
+        expect(c.log).toHaveBeenCalledWith('opencode-models: PASS');
+        expect(c.log).toHaveBeenCalledWith(`opencode-pong: ${failed ? 'FAIL' : 'PASS'}`);
+        expect(c.log).toHaveBeenCalledWith('opencode-japanese: PASS');
+        expect(c.log).toHaveBeenLastCalledWith(failed ? 'SUMMARY 5 PASS / 1 FAIL' : 'SUMMARY 6 PASS / 0 FAIL');
+        expect(prefs).toEqual(initial);
+        expect(c.switchService.setActive).toHaveBeenLastCalledWith('openai', 'saved');
+        expect(set.mock.calls.every((call: unknown[]) => call[2] === PreferenceScope.User)).toBe(true);
+    });
 });
 
 it('never resolves Windows launchers from cwd, relative PATH entries, or a local node.exe', () => {

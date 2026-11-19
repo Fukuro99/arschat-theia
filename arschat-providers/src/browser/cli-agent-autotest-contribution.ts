@@ -1,10 +1,10 @@
 import { inject, injectable } from '@theia/core/shared/inversify';
-import { PreferenceService } from '@theia/core';
+import { PreferenceScope, PreferenceService } from '@theia/core';
 import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { ChatService } from '@theia/ai-chat/lib/common/chat-service';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
-import { CLAUDE_SUBSCRIPTION_REQUIRED, CliAgentService } from '../common/cli-agents';
+import { CLAUDE_SUBSCRIPTION_REQUIRED, CLI_PREF, CliAgentService } from '../common/cli-agents';
 import { readCliSettings } from './cli-agent-preferences';
 import { ProviderSwitchService, ARSCHAT_CHAT_AGENT_ID } from './provider-switch-service';
 
@@ -26,6 +26,7 @@ export class CliAgentAutotestContribution implements FrontendApplicationContribu
         let pass = 0, fail = 0;
         const previous = this.switchService.getActiveProvider();
         const previousModel = this.switchService.getActiveModel();
+        const restorePreferences = new Map<string, unknown>();
         try {
             await this.preferences.ready;
             const settings = readCliSettings((key, fallback) => this.preferences.get(key, fallback));
@@ -46,8 +47,39 @@ export class CliAgentAutotestContribution implements FrontendApplicationContribu
                     pass++; this.log(`${scenario.name}: PASS`);
                 } catch { fail++; this.log(`${scenario.name}: FAIL`); }
             }
+            const opencodeModel = (await this.envServer.getValue('ARSCHAT_OPENCODE_AUTOTEST_MODEL'))?.value?.trim();
+            if (!opencodeModel) { this.log('opencode: SKIP'); }
+            else {
+                for (const [key, value] of [['opencode.model', opencodeModel], ['opencode.agent', 'plan']]) {
+                    const name = CLI_PREF + key;
+                    restorePreferences.set(name, this.preferences.inspect(name)?.globalValue);
+                    await this.preferences.set(name, value, PreferenceScope.User);
+                }
+                const opencodeSettings = readCliSettings((key, fallback) => this.preferences.get(key, fallback));
+                try {
+                    const models = await this.cliService.listModels('opencode-cli', opencodeSettings);
+                    if (!models.includes(opencodeModel)) { throw new Error('models'); }
+                    pass++; this.log('opencode-models: PASS');
+                } catch { fail++; this.log('opencode-models: FAIL'); }
+                for (const scenario of [
+                    { name: 'opencode-pong', prompt: 'Reply with exactly: PONG', expected: 'PONG' },
+                    { name: 'opencode-japanese', prompt: '日本の首都を漢字2文字で', expected: '東京' }
+                ]) {
+                    try {
+                        const selection = await this.switchService.setActive('opencode-cli');
+                        if (selection?.modelId !== 'opencode-cli') { throw new Error('selection'); }
+                        const reply = await this.roundTrip(scenario.prompt, (opencodeSettings.timeoutMinutes + 1) * 60000);
+                        if (!reply.includes(scenario.expected)) { throw new Error('response'); }
+                        pass++; this.log(`${scenario.name}: PASS`);
+                    } catch { fail++; this.log(`${scenario.name}: FAIL`); }
+                }
+            }
         } catch { fail++; this.log('setup: FAIL'); }
         finally {
+            for (const [key, value] of restorePreferences) {
+                try { await this.preferences.set(key, value, PreferenceScope.User); }
+                catch { fail++; this.log('restore-preference: FAIL'); }
+            }
             try { await this.switchService.setActive(previous, previousModel); } catch { fail++; this.log('restore: FAIL'); }
             this.log(`SUMMARY ${pass} PASS / ${fail} FAIL`);
         }

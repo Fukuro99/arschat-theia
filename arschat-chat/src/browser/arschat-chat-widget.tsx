@@ -61,7 +61,7 @@ import {
     PROVIDERS
 } from 'arschat-providers/lib/browser/arschat-provider-preferences';
 import { ProviderSwitchService, ARSCHAT_CHAT_AGENT_ID } from 'arschat-providers/lib/browser/provider-switch-service';
-import { CliAgentService, isCliAgent, CLI_PREF, CODEX_SANDBOX_MODES, CLAUDE_PERMISSION_MODES } from 'arschat-providers/lib/common/cli-agents';
+import { CliAgentService, isCliAgent, CLI_PREF, CODEX_SANDBOX_MODES, CLAUDE_PERMISSION_MODES, OPENCODE_AGENT_MODES } from 'arschat-providers/lib/common/cli-agents';
 import { PreferenceService, PreferenceScope } from '@theia/core';
 import { CLI_PREFERENCE_KEYS, readCliSettings } from 'arschat-providers/lib/browser/cli-agent-preferences';
 import { PersonaService } from 'arschat-agents/lib/browser/persona-service';
@@ -241,6 +241,11 @@ export class ArschatChatWidget extends ReactWidget {
     protected cliAgentNotice = '';
     protected cliCheckSequence = 0;
     protected cliPermissionPending = false;
+    protected opencodeModels: string[] = [];
+    protected opencodeModelsLoading = false;
+    protected opencodeModelsProvider: ArschatProviderKind | undefined;
+    protected opencodeModelsSequence = 0;
+    protected opencodeModelsRequest: Promise<string[]> | undefined;
     protected model = '';
     protected modelsByProvider: Map<ArschatProviderKind, LanguageModel[]> = new Map();
     protected configuredCustomModelsByProvider: Map<ArschatProviderKind, string> = new Map();
@@ -305,10 +310,12 @@ export class ArschatChatWidget extends ReactWidget {
         this.toDispose.push(this.switchService.onDidChange(sel => {
             this.provider = sel.provider;
             this.model = sel.model;
+            void this.refreshOpenCodeModels();
             void this.checkCliAgent();
             this.update();
         }));
         void this.checkCliAgent();
+        void this.refreshOpenCodeModels();
 
         this.toDispose.push(this.preferenceService.onPreferenceChanged(event => {
             if (event.preferenceName.startsWith(CLI_PREF)) { this.update(); }
@@ -524,6 +531,28 @@ export class ArschatChatWidget extends ReactWidget {
         }
     }
 
+    protected async refreshOpenCodeModels(): Promise<void> {
+        if (this.opencodeModelsProvider === this.provider) { return; }
+        this.opencodeModelsProvider = this.provider;
+        const seq = ++this.opencodeModelsSequence;
+        this.opencodeModels = [];
+        this.opencodeModelsLoading = this.provider === 'opencode-cli';
+        this.update();
+        if (!this.opencodeModelsLoading) { return; }
+        // Serialize rapid away/back switches; an old process must finish before another starts.
+        if (this.opencodeModelsRequest) { await this.opencodeModelsRequest; }
+        if (seq !== this.opencodeModelsSequence || this.isDisposed) { return; }
+        const pending = this.cliAgentService.listModels('opencode-cli',
+            readCliSettings((key, fallback) => this.preferenceService.get(key, fallback))).catch(() => []);
+        this.opencodeModelsRequest = pending;
+        const models = await pending;
+        if (this.opencodeModelsRequest === pending) { this.opencodeModelsRequest = undefined; }
+        if (seq !== this.opencodeModelsSequence || this.isDisposed) { return; }
+        this.opencodeModels = models;
+        this.opencodeModelsLoading = false;
+        this.update();
+    }
+
     protected currentModelNames(): string[] {
         if (isCliAgent(this.provider)) { return [this.provider]; }
         const provider = PROVIDERS.find(p => p.kind === this.provider);
@@ -550,6 +579,7 @@ export class ArschatChatWidget extends ReactWidget {
 
     protected async onProviderChange(kind: ArschatProviderKind): Promise<void> {
         this.provider = kind;
+        void this.refreshOpenCodeModels();
         this.cliAgentNotice = '';
         this.abortLiveCustomModelRequests(kind);
         await this.refreshModels();
@@ -578,6 +608,13 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected async onModelChange(model: string): Promise<void> {
+        if (this.provider === 'opencode-cli') {
+            try {
+                await this.preferenceService.set(CLI_PREF + CLI_PREFERENCE_KEYS.opencodeModel, model, PreferenceScope.User);
+            } catch { this.cliAgentNotice = 'CLI のモデルを保存できませんでした。'; }
+            this.update();
+            return;
+        }
         if (!model) {
             return;
         }
@@ -1731,6 +1768,16 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected renderModelOptions(modelNames: string[]): React.ReactNode {
+        if (this.provider === 'opencode-cli') {
+            const current = this.currentModelSelectValue(modelNames);
+            const names = current && !this.opencodeModels.includes(current) ? [current, ...this.opencodeModels] : this.opencodeModels;
+            return <>
+                <option value=''>(OpenCode の既定)</option>
+                {this.opencodeModelsLoading && <option disabled>(取得中...)</option>}
+                {!this.opencodeModelsLoading && this.opencodeModels.length === 0 && <option disabled>(モデルが見つかりません)</option>}
+                {names.map(name => <option key={name} value={name}>{name}</option>)}
+            </>;
+        }
         if (this.isCustomEndpointProvider(this.provider)) {
             const state = this.customModelLoadStates.get(this.provider);
             if (state === 'loading') {
@@ -1749,6 +1796,9 @@ export class ArschatChatWidget extends ReactWidget {
     }
 
     protected currentModelSelectValue(modelNames: string[]): string {
+        if (this.provider === 'opencode-cli') {
+            return readCliSettings((key, fallback) => this.preferenceService.get(key, fallback)).opencodeModel;
+        }
         if (this.isCustomEndpointProvider(this.provider)) {
             const state = this.customModelLoadStates.get(this.provider);
             if (state === 'loading' || state === 'error') {
@@ -1758,14 +1808,15 @@ export class ArschatChatWidget extends ReactWidget {
         return modelNames.includes(this.model) ? this.model : '';
     }
 
-    protected cliPermissionSelection(): { key: 'codexSandbox' | 'claudePermissionMode'; value: string; modes: readonly string[] } {
-        const key = this.provider === 'codex-cli' ? 'codexSandbox' : 'claudePermissionMode';
+    protected cliPermissionSelection(): { key: 'codexSandbox' | 'claudePermissionMode' | 'opencodeAgent'; value: string; modes: readonly string[] } {
+        const key = this.provider === 'codex-cli' ? 'codexSandbox' : this.provider === 'opencode-cli' ? 'opencodeAgent' : 'claudePermissionMode';
         const settings = readCliSettings((name, fallback) => this.preferenceService.get(name, fallback));
-        return { key, value: settings[key], modes: key === 'codexSandbox' ? CODEX_SANDBOX_MODES : CLAUDE_PERMISSION_MODES };
+        return { key, value: settings[key], modes: key === 'codexSandbox' ? CODEX_SANDBOX_MODES
+            : key === 'opencodeAgent' ? OPENCODE_AGENT_MODES : CLAUDE_PERMISSION_MODES };
     }
 
     protected isUnrestrictedCliMode(value: string): boolean {
-        return value === 'danger-full-access' || value === 'bypassPermissions';
+        return value === 'danger-full-access' || value === 'bypassPermissions' || value === 'build';
     }
 
     protected readonly cliPermissionWarning = 'このモードでは CLI がファイル削除やコマンド実行を確認なしで行えます。';
@@ -1819,7 +1870,8 @@ export class ArschatChatWidget extends ReactWidget {
     render(): React.ReactElement {
         const modelNames = this.currentModelNames();
         const customModelState = this.customModelLoadStates.get(this.provider);
-        const modelSelectDisabled = customModelState === 'loading' || customModelState === 'error';
+        const modelSelectDisabled = customModelState === 'loading' || customModelState === 'error'
+            || (this.provider === 'opencode-cli' && this.opencodeModelsLoading);
         return (
             <div
                 id='arschat-chat-root'

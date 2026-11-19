@@ -30,6 +30,7 @@
 | — | ローカル LLM プロバイダ追加 (Ollama / vLLM / llama.cpp / OpenAI 互換) |
 | — | VS Code 拡張のビューが希釈から漏れる問題の修正 (M6 シナリオ 2 が PASS に) |
 | — | Claude Code / Codex を公式 CLI 経由で呼ぶプロバイダ (Codex は ChatGPT ログイン、Claude Code は CLI 自身のサブスクリプションのログイン。権限モードはヘッダーで切替) |
+| — | OpenCode (CLI) プロバイダ (OpenCode に設定したモデル、例: Edge の Qwen をヘッダーのモデル欄から選択。plan / build 切替) |
 
 ## 未着手の開発
 
